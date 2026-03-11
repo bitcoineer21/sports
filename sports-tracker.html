@@ -108,7 +108,7 @@ function parFmt(n){if(n==null)return 'E';let s=String(n).trim();if(!s)return 'E'
 function parCls(s){let str=String(s||'').trim().replace(/[−–—]/g,'-');if(str==='E')return 'e';const x=Number(str.replace(/^\+/,''));if(isNaN(x))return 'e';return x<0?'u':x>0?'o':'e';}
 function el(id){return document.getElementById(id)}
 
-async function safeFetch(url,timeout=5000){
+async function safeFetch(url,timeout=12000){
   const ctrl=new AbortController();
   const tid=setTimeout(()=>ctrl.abort(),timeout);
   try{
@@ -168,7 +168,7 @@ function render(){
   // Zweite Tab-Reihe: Europa-Sub-Tabs
   if(state.cur==='bundesliga'&&tab===5){
     const sub=document.createElement('div');sub.className='tabs';sub.style.cssText='border-top:1px solid rgba(255,255,255,0.06);padding-top:6px;';
-    ['CL Ergebnisse','CL Anstehend','EL Ergebnisse','EL Anstehend'].forEach((t,i)=>{
+    ['CL Ergebnisse','CL +1','EL Ergebnisse','EL +1'].forEach((t,i)=>{
       const btn=document.createElement('button');btn.className='tab-btn'+(i===euroSub.tab?' active':'');btn.textContent=t;
       btn.addEventListener('click',()=>{euroSub.tab=i;render();});sub.appendChild(btn);
     });
@@ -661,9 +661,11 @@ async function fetchGolfTeeTimes(){
   const today=new Date().toISOString().slice(0,10);
   const evEnd=(event.endDate||'').slice(0,10);
   if(!evEnd||evEnd<today)return{tournament,round:'Kein aktives Turnier',note:'',teetimes:[]};
-  const list=(comp.competitors||[]).filter(c=>c?.athlete?.displayName).map(c=>{const st=c.status||{};const iso=st.teeTime||null;const ms=iso?Date.parse(iso):NaN;const teeUS=isFinite(ms)?new Intl.DateTimeFormat('en-US',{weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/New_York'}).format(new Date(ms)):(st.detail||'-');const teeDE=isFinite(ms)?new Intl.DateTimeFormat('de-DE',{weekday:'short',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Berlin'}).format(new Date(ms)):'';return{ms:isFinite(ms)?ms:9e15,tee:teeUS,teeDE,player:c.athlete.displayName,state:st?.type?.state||''};}).filter(x=>x.state!=='post'||!isFinite(x.ms)).sort((a,b)=>a.ms-b.ms);
-  const groups=new Map();for(const x of list){if(x.tee==='-')continue;const key=x.tee+'|'+x.teeDE;if(!groups.has(key))groups.set(key,{teeUS:x.tee,teeDE:x.teeDE,players:[]});groups.get(key).players.push(x.player);}
-  return{tournament,round,note:'Quelle: ESPN. Offizielle Tee-Times: pgatour.com',teetimes:[...groups.entries()].map(([,v])=>({teeTime:v.teeUS,teeDE:v.teeDE,players:v.players}))};
+  const list=(comp.competitors||[]).filter(c=>c?.athlete?.displayName).map(c=>{const st=c.status||{};const iso=st.teeTime||null;const ms=iso?Date.parse(iso):NaN;const teeUS=isFinite(ms)?new Intl.DateTimeFormat('en-US',{weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/New_York'}).format(new Date(ms)):(st.detail||'-');const teeDE=isFinite(ms)?new Intl.DateTimeFormat('de-DE',{weekday:'short',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Berlin'}).format(new Date(ms)):'';const startHole=Number(st.startHole||1);return{ms:isFinite(ms)?ms:9e15,tee:teeUS,teeDE,player:c.athlete.displayName,state:st?.type?.state||'',startHole};}).filter(x=>x.state!=='post'||!isFinite(x.ms)).sort((a,b)=>a.ms-b.ms);
+  const hasShotgun=list.some(x=>x.startHole===10);
+  const groups=new Map();for(const x of list){if(x.tee==='-')continue;const key=x.tee+'|'+x.teeDE+'|'+x.startHole;if(!groups.has(key))groups.set(key,{teeUS:x.tee,teeDE:x.teeDE,startHole:x.startHole,players:[]});groups.get(key).players.push(x.player);}
+  const teetimes=[...groups.values()].sort((a,b)=>a.ms-b.ms||a.startHole-b.startHole).map(v=>({teeTime:v.teeUS,teeDE:v.teeDE,startHole:hasShotgun?v.startHole:null,players:v.players}));
+  return{tournament,round,note:'Quelle: ESPN. Offizielle Tee-Times: pgatour.com',teetimes};
 }
 
 // ─── LOADERS ──────────────────────────────────────────────
@@ -684,7 +686,7 @@ function renderGame(g){
   return '<div class="card'+(lv?' live-red':'')+'">'+
     (lv?'<span class="badge red">● LIVE'+(g.clock?' '+esc(g.clock):'')+'</span>':'')+
     '<div style="display:flex;align-items:center;gap:10px"><div style="flex:1"><div class="team">'+esc(g.home)+'</div><div class="vs">vs</div><div class="team">'+esc(g.away)+'</div></div>'+
-    '<div style="text-align:center;min-width:64px">'+(lv||dn?'<div class="score '+(lv?'live':'done')+'">'+(g.hs!=null?g.hs:'-')+' : '+(g.as!=null?g.as:'-')+'</div>':'<div class="date-info"><div>'+esc(fd(g.date))+'</div><div><strong>'+esc(g.time||'')+'</strong></div></div>')+
+    '<div style="text-align:center;min-width:64px">'+(lv||dn?'<div class="score '+(lv?'live':'done')+'">'+(g.hs!=null?g.hs:'-')+' : '+(g.as!=null?g.as:'-')+'</div>':'<div class="date-info"><div><strong>'+esc(g.time||fd(g.date)||'')+'</strong></div></div>')+
     '</div></div></div>';
 }
 function renderGames(games){if(!games?.length)return '<div class="empty">Keine Spiele</div>';const sorted=games.slice().sort((a,b)=>{const liveA=a.status==='live'?0:1,liveB=b.status==='live'?0:1;if(liveA!==liveB)return liveA-liveB;const da=(a.date||'')+'T'+(a.time||'99:99');const db=(b.date||'')+'T'+(b.time||'99:99');return da<db?-1:da>db?1:0;});return sorted.map(renderGame).join('');}
@@ -833,7 +835,8 @@ function rGolfTeeTimes(d){
   h+='<div class="card" style="padding:0 6px"><table class="tbl"><thead><tr><th class="l" style="min-width:80px">ET / DE</th><th class="l">Spieler</th></tr></thead><tbody>';
   d.teetimes.forEach(t=>{
     const deStr=t.teeDE?'<span style="color:#4a9eff"> / '+esc(t.teeDE)+'</span>':'';
-    h+='<tr><td style="font-size:11px;vertical-align:top;white-space:nowrap"><span style="font-weight:700;color:#fff">'+esc(t.teeTime)+'</span>'+deStr+'</td><td class="l">'+(t.players||[]).map(p=>'<div>'+esc(p)+'</div>').join('')+'</td></tr>';});
+    const holeStr=t.startHole?'<span style="font-size:9px;color:#888;margin-left:4px">Loch '+t.startHole+'</span>':'';
+    h+='<tr><td style="font-size:11px;vertical-align:top;white-space:nowrap"><span style="font-weight:700;color:#fff">'+esc(t.teeTime)+'</span>'+deStr+holeStr+'</td><td class="l">'+(t.players||[]).map(p=>'<div>'+esc(p)+'</div>').join('')+'</td></tr>';});
   return h+'</tbody></table></div>';
 }
 function rStreams(content){content.innerHTML='<div class="card" style="padding:16px"><div style="font-size:13px;font-weight:700;margin-bottom:14px;text-align:center">🔴 Live Streams</div><a href="https://www.vipbox.lc" target="_blank" class="stream-btn">vipbox.lc</a><a href="https://buffsports.io" target="_blank" class="stream-btn">buffsports.io</a><a href="https://livetv.ru" target="_blank" class="stream-btn" style="margin-bottom:0">livetv.ru</a></div>';}
@@ -853,7 +856,16 @@ const _switchTab=switchTab;switchTab=function(i){_switchTab(i);saveState();};
 
 el('btn-refresh').addEventListener('click',refresh);
 buildNav();render();
-Object.keys(LOADERS).forEach(k=>{const[s,t]=k.split('_');load(s,Number(t));});
+(async()=>{
+  const activeKey=state.cur+'_'+state.tabs[state.cur];
+  if(LOADERS[activeKey])await load(state.cur,state.tabs[state.cur]);
+  for(const k of Object.keys(LOADERS)){
+    if(k===activeKey)continue;
+    const[s,t]=k.split('_');
+    await load(s,Number(t));
+    await new Promise(r=>setTimeout(r,300));
+  }
+})();
 </script>
 </body>
 </html>
