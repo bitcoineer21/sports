@@ -297,10 +297,57 @@ function parseSoccer(events){
     const t2=(c?.competitors||[]).find(x=>x.homeAway==='away');
     const done=c?.status?.type?.completed;
     const live=c?.status?.type?.state==='in';
+    const dateStr=c?.date?.slice(0,10)||'';
+    
     return{home:t1?.team?.displayName||'?',away:t2?.team?.displayName||'?',
       hs:(done||live)?Number(t1?.score||0):null,as:(done||live)?Number(t2?.score||0):null,
       status:done?'finished':live?'live':'upcoming',
-      date:c?.date?.slice(0,10)||null,time:c?.date?ft(c.date):null};
+      round:(()=>{
+        // Sammle alle verfügbaren Notes
+        const allNotes=[];
+        if(c?.notes?.[0]?.headline)allNotes.push(c.notes[0].headline);
+        if(ev.notes?.[0]?.headline)allNotes.push(ev.notes[0].headline);
+        
+        // Entferne Duplikate und unnötige Präfixe
+        const unique=new Set(allNotes.map(n=>n.trim().replace(/^\d+\.\s*/,'')));
+        const notes=Array.from(unique);
+        
+        // Extrahiere Runden-Info aus Notes
+        let roundInfo='';
+        for(const note of notes){
+          const lower=note.toLowerCase();
+          if(lower.includes('final')&&lower.includes('semi')){roundInfo='Halbfinale';break;}
+          else if(lower.includes('semi final')){roundInfo='Halbfinale';break;}
+          else if(lower.includes('final')&&!lower.includes('quarter')){roundInfo='Finale';break;}
+          else if(lower.includes('quarter final')){roundInfo='Viertelfinale';break;}
+          else if(lower.includes('round of 16')||lower.includes('round of 8')){roundInfo=note;break;}
+        }
+        
+        // Fallback: Runde basierend auf Spieldatum ableiten
+        if(!roundInfo&&dateStr){
+          const month=dateStr.slice(5,7);
+          const league=ev.league?.name||'';
+          if(month==='02'||month==='03')roundInfo='Achtelfinale';
+          else if(month==='04')roundInfo='Viertelfinale';
+          else if(month==='05'&&dateStr<'2026-05-20')roundInfo='Halbfinale';
+          else if(month==='05'||month==='06')roundInfo='Finale';
+        }
+        
+        // Kombiniere Runden-Info mit Leg-Info
+        let legInfo='';
+        for(const note of notes){
+          if(note.includes('1st Leg')||note.includes('2nd Leg')||note.includes('Leg')){
+            legInfo=note;break;
+          }
+        }
+        
+        // Kombiniere alles
+        if(roundInfo&&legInfo)return roundInfo+' · '+legInfo;
+        else if(roundInfo)return roundInfo;
+        else if(legInfo)return legInfo;
+        else return notes.join(' · ')||'';
+      })(),
+      date:dateStr||null,time:c?.date?ft(c.date):null};
   });
 }
 
@@ -690,8 +737,10 @@ async function load(sport,tab){const k=sport+'_'+tab;if(busy[k])return;busy[k]=t
 // ─── RENDERERS ────────────────────────────────────────────
 function renderGame(g){
   const lv=g.status==='live',dn=g.status==='finished';
+  const roundDisplay=g.round||'';
   return '<div class="card'+(lv?' live-red':'')+'">'+
     (lv?'<span class="badge red">● LIVE'+(g.clock?' '+esc(g.clock):'')+'</span>':'')+
+    (roundDisplay?'<div style="font-size:10px;color:var(--fg2);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;font-weight:800">'+esc(roundDisplay)+'</div>':'')+
     '<div style="display:flex;align-items:center;gap:10px"><div style="flex:1"><div class="team">'+esc(g.home)+'</div><div class="vs">vs</div><div class="team">'+esc(g.away)+'</div></div>'+
     '<div style="text-align:center;min-width:64px">'+(lv||dn?'<div class="score '+(lv?'live':'done')+'">'+(g.hs!=null?g.hs:'-')+' : '+(g.as!=null?g.as:'-')+'</div>':'<div class="date-info"><div><strong>'+esc(g.time||fd(g.date)||'')+'</strong></div></div>')+
     '</div></div></div>';
@@ -707,9 +756,10 @@ function rEuropa(d,subTab){
   const isCL=subTab<=1,showUpcoming=subTab===1||subTab===3;
   const src=isCL?d.cl:d.el;
   const title=isCL?'Champions League':'Europa League';
-  const games=(src||[]).filter(g=>showUpcoming?g.status==='upcoming':(g.status==='finished'||g.status==='live'));
-  let h='<div class="card" style="text-align:center;padding:9px 14px"><span style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:2px;font-weight:700">'+esc(title)+'</span></div>';
-  return h+(games.length?renderGames(games):'<div class="empty">Keine Spiele</div>');
+  let games=(src||[]).filter(g=>showUpcoming?g.status==='upcoming':(g.status==='finished'||g.status==='live'));
+  if(!showUpcoming) games=games.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  let h='<div class="card" style="text-align:center;padding:9px 14px"><span style="font-size:11px;color:var(--fg3);text-transform:uppercase;letter-spacing:2px;font-weight:700">'+esc(title)+'</span></div>';
+  return h+(games.length?games.map(renderGame).join(''):'<div class="empty">Keine Spiele</div>');
 }
 
 function rDFB(d){
@@ -744,13 +794,13 @@ function rF1Kalender(d){
       if(r.date&&r.raceTime)sessions.push({label:'Rennen',dt:fmtSession(r.date,r.raceTime),isRace:true});
       if(sessions.length){
         schedule='<div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.08);padding-top:8px">';
-        sessions.forEach(s=>{if(!s.dt)return;schedule+='<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--tbl-border)"><span style="font-size:12px;font-weight:'+(s.isRace?'800':'600')+';color:'+(s.isRace?'#ff4444':'#ccc')+'">'+esc(s.label)+'</span><span style="font-size:11px;color:var(--fg3)">'+esc(s.dt)+'</span></div>';});
+        sessions.forEach(s=>{if(!s.dt)return;schedule+='<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--tbl-border)"><span style="font-size:12px;font-weight:'+(s.isRace?'800':'600')+';color:'+(s.isRace?'#ff4444':'var(--fg2)')+'">'+esc(s.label)+'</span><span style="font-size:11px;color:var(--fg3)">'+esc(s.dt)+'</span></div>';});
         schedule+='</div>';
       }
     }
     return '<div class="card'+(isCur?' live-red':isNext?' live-blue':'')+'">'+
       (isCur?'<span class="badge red">Aktuelles Wochenende</span>':isNext?'<span class="badge blue">Nächstes Rennen</span>':'')+
-      '<div style="display:flex;align-items:center;gap:10px"><div style="flex:1"><div style="font-size:13px;font-weight:700;'+(r.past&&!highlight?'opacity:0.4':'')+'">'+( r.round?r.round+'. ':'')+esc(r.name)+'</div><div style="font-size:11px;color:#555;margin-top:2px">'+esc(r.circuit||'')+'</div></div><div style="text-align:right"><div style="font-size:12px;color:'+(r.past&&!highlight?'#444':'#ccc')+';font-weight:600">'+esc(r.date)+'</div></div></div>'+schedule+'</div>';
+      '<div style="display:flex;align-items:center;gap:10px"><div style="flex:1"><div style="font-size:13px;font-weight:700;'+(r.past&&!highlight?'opacity:0.4':'')+'">'+( r.round?r.round+'. ':'')+esc(r.name)+'</div><div style="font-size:11px;color:#555;margin-top:2px">'+esc(r.circuit||'')+'</div></div><div style="text-align:right"><div style="font-size:12px;color:'+(r.past&&!highlight?'#666':'var(--fg2)')+';font-weight:600">'+esc(r.date)+'</div></div></div>'+schedule+'</div>';
   }).join('');
 }
 
@@ -798,8 +848,8 @@ function matchCard(m){
   else{scoreHtml='<div class="tennis-score-block"><div style="font-size:12px;color:#4a9eff">'+esc(m.time||'')+'</div></div>';}
   return '<div class="card'+(live?' live-red':'')+'">'+
     (live?'<span class="badge red">● LIVE</span>':'')+
-    '<div style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;font-weight:700">'+esc(m.tourn||'')+(m.round?' · '+esc(m.round):'')+'</div>'+
-    '<div style="display:flex;align-items:center;gap:8px"><div style="flex:1"><div style="font-size:13px;font-weight:'+(w1?'900':'500')+';color:'+(w1?'#fff':done&&!w1?'#555':'#ccc')+'">'+esc(m.player1)+'</div><div style="font-size:13px;font-weight:'+(w2?'900':'500')+';color:'+(w2?'#fff':done&&!w2?'#555':'#ccc')+';margin-top:4px">'+esc(m.player2)+'</div></div>'+scoreHtml+'</div></div>';
+    '<div style="font-size:9px;color:var(--fg3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;font-weight:700">'+esc(m.tourn||'')+(m.round?' · '+esc(m.round):'')+'</div>'+
+    '<div style="display:flex;align-items:center;gap:8px"><div style="flex:1"><div style="font-size:13px;font-weight:'+(w1?'900':'500')+';color:'+(w1?'var(--fg)':done&&!w1?'var(--fg4)':'var(--fg3)')+'">'+esc(m.player1)+'</div><div style="font-size:13px;font-weight:'+(w2?'900':'500')+';color:'+(w2?'var(--fg)':done&&!w2?'var(--fg4)':'var(--fg3)')+';margin-top:4px">'+esc(m.player2)+'</div></div>'+scoreHtml+'</div></div>';
 }
 function rTennis(d,subTab){
   let h='<div class="card" style="text-align:center;padding:8px 14px"><div style="font-size:12px;font-weight:700;color:var(--fg3)">'+esc(d.tournament||'')+'</div></div>';
