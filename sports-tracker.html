@@ -290,7 +290,7 @@ async function fetchBLNaechster(){const{md,season}=await getBL();return{md:md+1,
 async function fetchBLTabelle(){const{season}=await getBL();const rows=await safeFetch('https://api.openligadb.de/getbltable/bl1/'+season);return{rows:(rows||[]).map((t,i)=>({pos:i+1,team:t.teamName,played:t.matches,pts:t.points,gd:t.goalDiff}))}}
 
 // ─── CL / EL / DFB ───────────────────────────────────────
-function parseSoccer(events){
+function parseSoccer(events, leagueName=''){
   return(events||[]).map(ev=>{
     const c=ev.competitions?.[0];
     const t1=(c?.competitors||[]).find(x=>x.homeAway==='home');
@@ -299,14 +299,19 @@ function parseSoccer(events){
     const live=c?.status?.type?.state==='in';
     const dateStr=c?.date?.slice(0,10)||'';
     
+    // Extrahiere Live-Minuten/Status
+    const clock=live?c?.status?.displayClock||c?.status?.detail||'':'';
+    
     return{home:t1?.team?.displayName||'?',away:t2?.team?.displayName||'?',
       hs:(done||live)?Number(t1?.score||0):null,as:(done||live)?Number(t2?.score||0):null,
       status:done?'finished':live?'live':'upcoming',
+      clock:clock,
       round:(()=>{
-        // Sammle alle verfügbaren Notes
+        // Sammle alle verfügbaren Notes und Details
         const allNotes=[];
         if(c?.notes?.[0]?.headline)allNotes.push(c.notes[0].headline);
         if(ev.notes?.[0]?.headline)allNotes.push(ev.notes[0].headline);
+        if(c?.shortDetail)allNotes.push(c.shortDetail);
         
         // Entferne Duplikate und unnötige Präfixe
         const unique=new Set(allNotes.map(n=>n.trim().replace(/^\d+\.\s*/,'')));
@@ -316,18 +321,39 @@ function parseSoccer(events){
         let roundInfo='';
         for(const note of notes){
           const lower=note.toLowerCase();
-          if(lower.includes('final')&&lower.includes('semi')){roundInfo='Halbfinale';break;}
-          else if(lower.includes('semi final')){roundInfo='Halbfinale';break;}
+          if((lower.includes('semi')&&lower.includes('final'))||lower.includes('semifinal')){roundInfo='Halbfinale';break;}
           else if(lower.includes('final')&&!lower.includes('quarter')){roundInfo='Finale';break;}
-          else if(lower.includes('quarter final')){roundInfo='Viertelfinale';break;}
-          else if(lower.includes('round of 16')||lower.includes('round of 8')){roundInfo=note;break;}
+          else if(lower.includes('quarter')||lower.includes('viertel')){roundInfo='Viertelfinale';break;}
+          else if(lower.includes('round of 16')||lower.includes('round of 8')||lower.includes('achtel')){roundInfo='Achtelfinale';break;}
+          else if(lower.includes('playoff')){roundInfo='Playoffs';break;}
         }
         
-        // Fallback: Runde basierend auf Spieldatum ableiten
-        if(!roundInfo&&dateStr){
+        // Übersetze ESPN-Englisch Runden ins Deutsche für Europa-Ligen
+        if(!roundInfo && (leagueName.includes('UEFA')||leagueName.includes('CHAMPIONS')||leagueName.includes('EUROPA'))){
+          for(const note of notes){
+            const lower=note.toLowerCase();
+            if(lower.includes('playoff')){roundInfo='Playoffs';break;}
+            else if(lower.includes('round of 16')){roundInfo='Achtelfinale';break;}
+            else if(lower.includes('round of 8')||lower.includes('quarterfinal')){roundInfo='Viertelfinale';break;}
+            else if(lower.includes('semifinal')){roundInfo='Halbfinale';break;}
+            else if(lower.includes('final')&&!lower.includes('quarter')){roundInfo='Finale';break;}
+          }
+        }
+        
+        // DFB-Pokal: Runde auf Deutsch nach Datum bestimmen
+        if(!roundInfo && leagueName.includes('dfb')){
           const month=dateStr.slice(5,7);
-          const league=ev.league?.name||'';
-          if(month==='02'||month==='03')roundInfo='Achtelfinale';
+          // DFB-Pokal 2025/26: Feb-März = Viertelfinale, April = Halbfinale, Mai+ = Finale
+          if(month==='02'||month==='03')roundInfo='Viertelfinale';
+          else if(month==='04')roundInfo='Halbfinale';
+          else if(month==='05'||month==='06')roundInfo='Finale';
+        }
+        
+        // Champions/Europa Liga: Runde nach Datum auf Deutsch bestimmen
+        if(!roundInfo && (leagueName.includes('UEFA')||leagueName.includes('CHAMPIONS')||leagueName.includes('EUROPA'))){
+          const month=dateStr.slice(5,7);
+          if(month==='02')roundInfo='Playoffs';
+          else if(month==='03')roundInfo='Achtelfinale';
           else if(month==='04')roundInfo='Viertelfinale';
           else if(month==='05'&&dateStr<'2026-05-20')roundInfo='Halbfinale';
           else if(month==='05'||month==='06')roundInfo='Finale';
@@ -354,7 +380,7 @@ function parseSoccer(events){
 async function fetchSoccerMultiDate(league,dates){
   const base='https://site.web.api.espn.com/apis/site/v2/sports/soccer/'+league+'/scoreboard';
   const allGames=[],seen=new Set();
-  const results=await Promise.all(dates.map(d=>safeFetch(base+'?limit=100&dates='+d).then(j=>parseSoccer(j.events||[])).catch(()=>[])));
+  const results=await Promise.all(dates.map(d=>safeFetch(base+'?limit=100&dates='+d).then(j=>parseSoccer(j.events||[],league)).catch(()=>[])));
   results.forEach(gs=>gs.forEach(g=>{const k=g.home+'|'+g.away+'|'+g.date;if(!seen.has(k)){seen.add(k);allGames.push(g);}}));
   const live=allGames.filter(g=>g.status==='live');
   const finished=allGames.filter(g=>g.status==='finished').sort((a,b)=>(b.date||'').localeCompare(a.date||''));
@@ -368,16 +394,19 @@ async function fetchEuropa(){
     fetchSoccerMultiDate('UEFA.CHAMPIONS',[
       '20260211','20260212','20260217','20260218','20260219','20260224','20260225',
       '20260310','20260311','20260317','20260318',
-      '20260407','20260408','20260414','20260415'
+      '20260407','20260408','20260414','20260415',
+      '20260421','20260422','20260423','20260424','20260425','20260426'
     ]),
     fetchSoccerMultiDate('UEFA.EUROPA',[
       '20260219','20260220','20260226','20260227',
       '20260312','20260313','20260319','20260320',
-      '20260409','20260410','20260416','20260417'
+      '20260409','20260410','20260416','20260417',
+      '20260421','20260422','20260423','20260424','20260425','20260426'
     ]),
     fetchSoccerMultiDate('ger.dfb_pokal',[
       '20260203','20260204','20260210','20260211',
-      '20260421','20260422',
+      '20260318','20260319','20260320','20260321','20260322',
+      '20260421','20260422','20260423','20260424','20260425',
       '20260523','20260524'
     ]),
   ]);
@@ -742,7 +771,7 @@ function renderGame(g){
     (lv?'<span class="badge red">● LIVE'+(g.clock?' '+esc(g.clock):'')+'</span>':'')+
     (roundDisplay?'<div style="font-size:10px;color:var(--fg2);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;font-weight:800">'+esc(roundDisplay)+'</div>':'')+
     '<div style="display:flex;align-items:center;gap:10px"><div style="flex:1"><div class="team">'+esc(g.home)+'</div><div class="vs">vs</div><div class="team">'+esc(g.away)+'</div></div>'+
-    '<div style="text-align:center;min-width:64px">'+(lv||dn?'<div class="score '+(lv?'live':'done')+'">'+(g.hs!=null?g.hs:'-')+' : '+(g.as!=null?g.as:'-')+'</div>':'<div class="date-info"><div><strong>'+esc(g.time||fd(g.date)||'')+'</strong></div></div>')+
+    '<div style="text-align:center;min-width:64px">'+(lv||dn?'<div><div class="score '+(lv?'live':'done')+'">'+(g.hs!=null?g.hs:'-')+' : '+(g.as!=null?g.as:'-')+'</div>'+(dn||lv?'<div style="font-size:10px;color:var(--fg3);margin-top:4px">'+esc(g.time||fd(g.date)||'')+'</div>':'')+'</div>':'<div class="date-info"><div><strong>'+esc(g.time||fd(g.date)||'')+'</strong></div></div>')+
     '</div></div></div>';
 }
 function renderGames(games){if(!games?.length)return '<div class="empty">Keine Spiele</div>';const sorted=games.slice().sort((a,b)=>{const liveA=a.status==='live'?0:1,liveB=b.status==='live'?0:1;if(liveA!==liveB)return liveA-liveB;const da=(a.date||'')+'T'+(a.time||'99:99');const db=(b.date||'')+'T'+(b.time||'99:99');return da<db?-1:da>db?1:0;});return sorted.map(renderGame).join('');}
@@ -902,8 +931,50 @@ function switchTab(i){state.tabs[state.cur]=i;render();const k=state.cur+'_'+i;i
 function refresh(){const k=state.cur+'_'+state.tabs[state.cur];delete cache[k];load(state.cur,state.tabs[state.cur]);}
 
 let _startY=0;
-document.addEventListener('touchstart',e=>{_startY=e.touches[0].clientY;},{passive:true});
-document.addEventListener('touchmove',e=>{const el2=e.target.closest('.tabs');if(el2)return;const dy=e.touches[0].clientY-_startY;if(dy>0&&(window.scrollY||document.documentElement.scrollTop)===0){e.preventDefault();}},{passive:false});
+let _pulling=false;
+let _pullIndicator=null;
+
+document.addEventListener('touchstart',e=>{_startY=e.touches[0].clientY;_pulling=true;},{passive:true});
+
+document.addEventListener('touchmove',e=>{
+  const el2=e.target.closest('.tabs');
+  if(el2)return;
+  
+  const dy=e.touches[0].clientY-_startY;
+  
+  // Wenn wir oben sind und nach unten ziehen, zeige Pull-to-Refresh
+  const scrollPos=(window.scrollY||document.documentElement.scrollTop);
+  if(scrollPos===0&&dy>0&&_pulling){
+    if(!_pullIndicator){
+      _pullIndicator=document.createElement('div');
+      _pullIndicator.style.cssText='position:fixed;top:8px;left:50%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--fg3);border-radius:20px;padding:6px 14px;font-size:12px;color:var(--fg2);z-index:999;transition:opacity 0.3s;opacity:0;font-weight:600';
+      _pullIndicator.textContent='⬇ Zum Aktualisieren runterziehen';
+      document.body.appendChild(_pullIndicator);
+    }
+    _pullIndicator.style.opacity=dy>60?'1':'0';
+    
+    if(dy>60){
+      e.preventDefault();
+    }
+  }
+},{passive:false});
+
+document.addEventListener('touchend',e=>{
+  const dy=e.changedTouches[0].clientY-_startY;
+  if(dy>60&&(window.scrollY||document.documentElement.scrollTop)===0){
+    if(_pullIndicator){
+      _pullIndicator.textContent='⏳ Wird aktualisiert...';
+      _pullIndicator.style.opacity='1';
+    }
+    refresh();
+    setTimeout(()=>{
+      if(_pullIndicator){
+        _pullIndicator.style.opacity='0';
+      }
+    },1500);
+  }
+  _pulling=false;
+},{passive:true});
 
 try{const saved=JSON.parse(sessionStorage.getItem('trackerState')||'{}');if(saved.cur&&SPORTS.find(s=>s.id===saved.cur))state.cur=saved.cur;if(saved.tabs)Object.assign(state.tabs,saved.tabs);if(saved.tennisSub!=null)tennisSub.tab=saved.tennisSub;if(saved.euroSub!=null)euroSub.tab=saved.euroSub;}catch(e){}
 function saveState(){try{sessionStorage.setItem('trackerState',JSON.stringify({cur:state.cur,tabs:state.tabs,tennisSub:tennisSub.tab,euroSub:euroSub.tab}));}catch(e){}}
