@@ -546,10 +546,10 @@ async function fetchF1Ergebnisse(){
   if(race?.raceName)raceName=race.raceName;
   else if(qualiRace?.raceName)raceName=qualiRace.raceName;
 
-  // ── RENNEN ZUERST (auch wenn noch leer) ──
+  // ── RENNEN (Main Race) ZUERST (auch wenn noch leer) ──
   // Rennen: Jolpica (offizielle Daten, ab Montag)
   if(race?.Results?.length){
-    sessions.push({label:'Rennen',date:race.date,isRace:true,results:
+    sessions.push({label:'Rennen (Sonntag)',date:race.date,isRace:true,results:
       race.Results.slice(0,20).map(r=>({
         pos:Number(r.position),
         driver:r.Driver.givenName+' '+r.Driver.familyName,
@@ -621,13 +621,13 @@ async function fetchF1Ergebnisse(){
     sessions.push({label:'Rennen',isRace:true,pending:true,results:[]});
   }
 
-  // ── SPRINT (nach Rennen) ──
+  // ── SPRINT (Samstag) ──
   if(sprintData?.results?.length){
     console.log('Adding sprint to sessions');
-    sessions.push({label:'Sprint 🔄',date:sprintData.date,isRace:false,results:sprintData.results});
+    sessions.push({label:'Sprint (Samstag) 🔄',date:sprintData.date,isRace:false,results:sprintData.results});
   }
 
-  // ── Qualifying: Jolpica (nach Sprint) ──
+  // ── Qualifying (Freitag/Samstag) ──
   if(qualiRace?.QualifyingResults?.length){
     sessions.push({label:'Qualifying',date:qualiRace.date||'',results:
       qualiRace.QualifyingResults.slice(0,20).map(r=>({
