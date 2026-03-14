@@ -473,20 +473,80 @@ async function fetchF1Ergebnisse(){
   const sessions=[];
   let raceName=meeting.name||'';
 
-  // Alle Quellen parallel abfragen
-  const [qualiJ, raceJ, openRes] = await Promise.all([
+  // Alle Quellen parallel abfragen (mit Sprint aus OpenF1)
+  const [qualiJ, raceJ, sprintJ, openRes] = await Promise.all([
     safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/qualifying/?format=json&limit=20').catch(()=>null),
     safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/results/?format=json&limit=20').catch(()=>null),
-    safeFetch('https://api.openf1.org/v1/session_result?session_key=latest',2000).catch(()=>null),
+    safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/sprint/?format=json&limit=20').catch(()=>null),
+    safeFetch('https://api.openf1.org/v1/session_result?session_key=latest&limit=50',2000).catch(()=>null),
   ]);
+  
+  // Lade Sprint dynamisch von OpenF1 - mit Retry
+  async function fetchSprintFromOpenF1(){
+    const retry=async(fn,times=3)=>{
+      for(let i=0;i<times;i++){
+        try{
+          return await fn();
+        }catch(e){
+          if(i===times-1)throw e;
+          await new Promise(r=>setTimeout(r,500));
+        }
+      }
+    };
+    
+    try{
+      // 1. Meetings mit Retry
+      const m=await retry(()=>fetch('https://api.openf1.org/v1/meetings?year=2026',{timeout:10000}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}));
+      const china=m.find(x=>x.country_name==='China');
+      if(!china){console.log('China not found');return null;}
+      
+      // 2. Sessions mit Retry
+      const s=await retry(()=>fetch('https://api.openf1.org/v1/sessions?meeting_key='+china.meeting_key,{timeout:10000}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}));
+      const sprint=s.find(x=>x.session_name==='Sprint');
+      if(!sprint){console.log('Sprint not found');return null;}
+      
+      // 3. Positions mit Retry
+      const p=await retry(()=>fetch('https://api.openf1.org/v1/position?session_key='+sprint.session_key,{timeout:10000}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}));
+      if(!Array.isArray(p)||!p.length){console.log('No positions');return null;}
+      
+      // 4. Drivers mit Retry
+      const driversRaw=await retry(()=>fetch('https://api.openf1.org/v1/drivers?session_key='+sprint.session_key,{timeout:10000}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}));
+      const drivers=Array.isArray(driversRaw)?driversRaw:[];
+      const dMap={};
+      drivers.forEach(x=>{dMap[x.driver_number]=x;});
+      console.log('Drivers loaded:',drivers.length);
+      
+      // 5. Zusammen
+      const fp={};
+      p.forEach(x=>{fp[x.driver_number]=x;});
+      const sort=Object.values(fp).sort((a,b)=>a.position-b.position);
+      const pts={1:8,2:7,3:6,4:5,5:4,6:3,7:2,8:1};
+      
+      const results=sort.slice(0,25).map(x=>({
+        pos:x.position,
+        driver:dMap[x.driver_number]?.full_name||'Driver #'+x.driver_number,
+        team:dMap[x.driver_number]?.team_name||'',
+        time:'',
+        points:pts[x.position]||0
+      }));
+      
+      console.log('Sprint results built:',results.length);
+      return{date:nowStr,results:results};
+    }catch(e){
+      console.error('SPRINT ERROR:', e.message);
+      return null;
+    }
+  }
+  
+  const sprintData=await fetchSprintFromOpenF1();
+  console.log('Sprint data result:', sprintData);
 
   const qualiRace=qualiJ?.MRData?.RaceTable?.Races?.[0];
   const race=raceJ?.MRData?.RaceTable?.Races?.[0];
   if(race?.raceName)raceName=race.raceName;
   else if(qualiRace?.raceName)raceName=qualiRace.raceName;
 
-  // ── Rennen zuerst (neueste Ergebnisse oben) ──
-
+  // ── RENNEN ZUERST (auch wenn noch leer) ──
   // Rennen: Jolpica (offizielle Daten, ab Montag)
   if(race?.Results?.length){
     sessions.push({label:'Rennen',date:race.date,isRace:true,results:
@@ -561,7 +621,13 @@ async function fetchF1Ergebnisse(){
     sessions.push({label:'Rennen',isRace:true,pending:true,results:[]});
   }
 
-  // ── Qualifying: Jolpica (nach Rennen) ──
+  // ── SPRINT (nach Rennen) ──
+  if(sprintData?.results?.length){
+    console.log('Adding sprint to sessions');
+    sessions.push({label:'Sprint 🔄',date:sprintData.date,isRace:false,results:sprintData.results});
+  }
+
+  // ── Qualifying: Jolpica (nach Sprint) ──
   if(qualiRace?.QualifyingResults?.length){
     sessions.push({label:'Qualifying',date:qualiRace.date||'',results:
       qualiRace.QualifyingResults.slice(0,20).map(r=>({
@@ -860,7 +926,7 @@ function rF1Ergebnisse(d){
       '</div>';
   }
   let h='<div class="card" style="text-align:center;padding:9px 14px"><div style="font-size:13px;font-weight:700">'+esc(d.raceName||'')+'</div><div style="font-size:11px;color:var(--fg4)">'+esc(d.raceDate||'')+'</div></div>';
-  d.sessions.forEach(s=>{const hasTeam=(s.results||[]).some(r=>r.team);const hasTime=(s.results||[]).some(r=>r.time);h+='<div class="card" style="padding:0 6px"><div style="padding:8px 6px 4px;font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:'+(s.isRace?'#ff4444':'#4a9eff')+'">'+esc(s.label)+'</div>'+(s.pending?'<div style="font-size:12px;color:#555;padding:6px 6px 10px">⏳ Offizielle Ergebnisse folgen in Kürze</div>':s.note?'<div style="font-size:10px;color:#555;padding:0 6px 6px">'+esc(s.note)+'</div>':'')+(s.pending?'':"<table class=\"tbl\"><thead><tr><th>#</th><th class=\"l\">Fahrer</th>"+(hasTeam?'<th class=\"l\">Team</th>':'')+(hasTime?'<th>Zeit</th>':'')+'</tr></thead><tbody>'+(s.results||[]).map(r=>'<tr><td><span class="pos '+(r.pos<=3?'cl':r.pos<=10?'eu':'')+'">'+r.pos+'</span></td><td class="l"><b>'+esc(r.driver)+'</b></td>'+(hasTeam?'<td class="l" style="font-size:11px;color:var(--fg4)">'+esc(r.team)+'</td>':'')+(hasTime?'<td style="font-size:11px;color:var(--fg4)">'+esc(r.time)+'</td>':'')+'</tr>').join('')+'</tbody></table>')+'</div>';});
+  d.sessions.forEach(s=>{const hasTeam=(s.results||[]).some(r=>r.team);const hasTime=(s.results||[]).some(r=>r.time);const hasPoints=(s.results||[]).some(r=>r.points);h+='<div class="card" style="padding:0 6px"><div style="padding:8px 6px 4px;font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:'+(s.isRace?'#ff4444':'#4a9eff')+'">'+esc(s.label)+'</div>'+(s.pending?'<div style="font-size:12px;color:#555;padding:6px 6px 10px">⏳ Offizielle Ergebnisse folgen in Kürze</div>':s.note?'<div style="font-size:10px;color:#555;padding:0 6px 6px">'+esc(s.note)+'</div>':'')+(s.pending?'':"<table class=\"tbl\"><thead><tr><th>#</th><th class=\"l\">Fahrer</th>"+(hasTeam?'<th class=\"l\">Team</th>':'')+(hasTime?'<th>Zeit</th>':'')+(hasPoints?'<th>Pkt</th>':'')+'</tr></thead><tbody>'+(s.results||[]).map(r=>'<tr><td><span class="pos '+(r.pos<=3?'cl':r.pos<=10?'eu':'')+'">'+r.pos+'</span></td><td class="l"><b>'+esc(r.driver)+'</b></td>'+(hasTeam?'<td class="l" style="font-size:11px;color:var(--fg4)">'+esc(r.team)+'</td>':'')+(hasTime?'<td style="font-size:11px;color:var(--fg4)">'+esc(r.time)+'</td>':'')+(hasPoints?'<td style="text-align:center;font-weight:600">'+(r.points||'-')+'</td>':'')+'</tr>').join('')+'</tbody></table>')+'</div>';});
   return h;
 }
 function rF1Fahrer(d){return '<div class="card" style="padding:0 6px"><table class="tbl"><thead><tr><th>#</th><th class="l">Fahrer</th><th class="l">Team</th><th>Pkt</th></tr></thead><tbody>'+(d.standings||[]).map(s=>'<tr><td><span class="pos '+(s.pos<=3?'cl':s.pos<=10?'eu':'')+'">'+s.pos+'</span></td><td class="l"><b>'+esc(s.driver)+'</b></td><td class="l" style="font-size:11px;color:var(--fg4)">'+esc(s.team)+'</td><td><span class="pts">'+s.points+'</span></td></tr>').join('')+'</tbody></table></div>';}
