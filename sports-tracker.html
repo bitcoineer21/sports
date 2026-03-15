@@ -302,10 +302,19 @@ function parseSoccer(events, leagueName=''){
     // Extrahiere Live-Minuten/Status
     const clock=live?c?.status?.displayClock||c?.status?.detail||'':'';
     
+    // Fallback: Berechne Minute selbst wenn keine vom API kommt
+    let displayClock=clock;
+    if(live&&!clock){
+      const now=new Date();
+      const start=new Date(c.date);
+      const diffMinutes=Math.floor((now-start)/60000);
+      if(diffMinutes>0&&diffMinutes<120)displayClock=diffMinutes+"'";
+    }
+    
     return{home:t1?.team?.displayName||'?',away:t2?.team?.displayName||'?',
       hs:(done||live)?Number(t1?.score||0):null,as:(done||live)?Number(t2?.score||0):null,
       status:done?'finished':live?'live':'upcoming',
-      clock:clock,
+      clock:displayClock,
       round:(()=>{
         // Sammle alle verfügbaren Notes und Details
         const allNotes=[];
@@ -698,6 +707,8 @@ function parseESPNTennisEvent(ev,results,matches){
     const cc=comp.competitors||[];if(cc.length<2)continue;
     const c1=cc[0],c2=cc[1];const p1=c1?.athlete?.displayName||'?',p2=c2?.athlete?.displayName||'?';if(p1==='?'&&p2==='?')continue;
     const state=comp?.status?.type?.state||'';const completed=comp?.status?.type?.completed||false;const round=comp?.round?.displayName||'';
+    // Qualifier und Qualifying rausfiltern
+    if(round.toLowerCase().includes('qualifier')||round.toLowerCase().includes('qualifying'))continue;
     if(state==='pre'){matches.push({player1:p1,player2:p2,status:'upcoming',round,tourn,time:comp.date?ft(comp.date):''});continue;}
     const ls1=c1?.linescores||[],ls2=c2?.linescores||[];const parts=[];
     for(let i=0;i<Math.max(ls1.length,ls2.length);i++){const g1=ls1[i]?.displayValue??ls1[i]?.value??'';const g2=ls2[i]?.displayValue??ls2[i]?.value??'';if(g1!==''||g2!=='')parts.push((g1||'0')+'-'+(g2||'0'));}
@@ -766,6 +777,13 @@ async function fetchGolfLB(){
   const{event,comp}=await fetchGolfLive();
   const scores=(comp.competitors||[]).filter(c=>c?.athlete?.displayName).map(c=>{
     const st=c?.status||{};
+    // Runden-Scores aus Linescores
+    const linescores=(c?.linescores||[]).map(l=>{
+      const v=l?.displayValue??l?.value;
+      if(v==null)return '-';
+      const s=String(v).trim().replace(/[−–—]/g,'-');
+      return s==='E'?'E':s;
+    });
     // today = heutiger Rundenscore (aus golfTodayDetail)
     const today=golfTodayDetail(c);
     // Total = Summe aller Runden-Linescores (jeder Linescore = Par-Ergebnis einer Runde)
@@ -792,6 +810,7 @@ async function fetchGolfLB(){
     const totalNum=calcTotal(c);
     const totalStr=totalNum==null?'-':totalNum===0?'E':totalNum>0?'+'+totalNum:String(totalNum);
     return{pos:st?.position?.displayName||'-',player:c.athlete.displayName,country:golfCountry3(c),
+      r1:linescores[0]||'-',r2:linescores[1]||'-',r3:linescores[2]||'-',
       score:totalStr,today,
       thru:st?.displayThru||(st?.type?.state==='post'?'F':(st?.thru!=null?String(st.thru):'-')),
       _totalNum:totalNum??999};
@@ -958,14 +977,16 @@ function rTennis(d,subTab){
 function rGolfLB(d){
   let h='<div class="card"><div style="font-size:13px;font-weight:700">'+esc(d.tournament)+'</div><div style="font-size:11px;color:#555;margin-top:2px">'+esc(d.course||'')+' · '+esc(d.round||'')+'</div></div>';
   if(!(d.scores||[]).length)return h+'<div class="empty">Keine Scores</div>';
-  h+='<div class="card" style="padding:8px 10px"><div style="display:flex;padding:0 0 5px;border-bottom:1px solid var(--tbl-border);font-size:10px;color:var(--fg5)"><span style="min-width:36px">#</span><span style="flex:1">Spieler</span><span style="min-width:40px;text-align:right">Heute</span><span style="min-width:42px;text-align:right">Total</span><span style="min-width:30px;text-align:right">Thru</span></div>';
+  h+='<div class="card" style="padding:8px 10px"><div style="display:flex;padding:0 0 5px;border-bottom:1px solid var(--tbl-border);font-size:10px;color:var(--fg5)"><span style="min-width:24px;text-align:center">#</span><span style="flex:1;min-width:120px">Spieler</span><span style="min-width:22px;text-align:center">R1</span><span style="min-width:22px;text-align:center">R2</span><span style="min-width:22px;text-align:center">R3</span><span style="min-width:28px;text-align:center">Heute</span><span style="min-width:32px;text-align:center">Total</span><span style="min-width:20px;text-align:center">Thru</span></div>';
   // ESPN liefert score bereits als aktuellen Gesamtstand inkl. laufender Runde
   // Nur nach score sortieren, nicht nochmal today addieren
   function toNum(s){const x=String(s||'').trim().replace(/[−–—]/g,'-');if(x==='E'||x==='Even'||x==='0')return 0;const n=Number(x.replace(/^\+/,''));return isNaN(n)?0:n;}
+  function todayColor(td){const n=toNum(td);if(n<0)return '#0a0';if(n>0)return '#f44';return '#666';}
   const scored=d.scores.slice().sort((a,b)=>(a._totalNum??toNum(a.score))-(b._totalNum??toNum(b.score)));
   scored.forEach((s,i)=>{
     const sc=parFmt(s.score),td=parFmt(s.today);
-    h+='<div class="srow"><span class="spos">'+esc(s.pos)+'</span><span class="sname">'+esc(s.player)+'<span style="font-size:10px;color:#444;margin-left:4px">'+esc(s.country)+'</span></span><span style="font-size:12px;color:#666;min-width:40px;text-align:right">'+esc(td)+'</span><span class="tpar '+parCls(sc)+'">'+esc(sc)+'</span><span class="thru">'+esc(s.thru)+'</span></div>';
+    const r1=parFmt(s.r1),r2=parFmt(s.r2),r3=parFmt(s.r3);
+    h+='<div class="srow"><span class="spos" style="min-width:24px;text-align:center">'+esc(s.pos)+'</span><span class="sname" style="flex:1;min-width:120px">'+esc(s.player)+'<span style="font-size:10px;color:#444;margin-left:4px">'+esc(s.country)+'</span></span><span class="tpar '+parCls(r1)+'" style="min-width:22px;text-align:center">'+esc(r1)+'</span><span class="tpar '+parCls(r2)+'" style="min-width:22px;text-align:center">'+esc(r2)+'</span><span class="tpar '+parCls(r3)+'" style="min-width:22px;text-align:center">'+esc(r3)+'</span><span style="font-size:12px;color:'+todayColor(td)+';min-width:28px;text-align:center;font-weight:600">'+esc(td)+'</span><span class="tpar '+parCls(sc)+'" style="min-width:32px;text-align:center">'+esc(sc)+'</span><span class="thru" style="min-width:20px;text-align:center">'+esc(s.thru)+'</span></div>';
   });
   return h+'</div>';
 }
