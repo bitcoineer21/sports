@@ -504,15 +504,25 @@ async function fetchF1Ergebnisse(){
     };
     
     try{
-      // 1. Meetings mit Retry
+      // 1. Hole aktuelles Meeting (das dass gerade läuft oder letzte)
       const m=await retry(()=>fetch('https://api.openf1.org/v1/meetings?year=2026',{timeout:10000}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}));
-      const china=m.find(x=>x.country_name==='China');
-      if(!china){console.log('China not found');return null;}
+      if(!Array.isArray(m)||!m.length)return null;
       
-      // 2. Sessions mit Retry
-      const s=await retry(()=>fetch('https://api.openf1.org/v1/sessions?meeting_key='+china.meeting_key,{timeout:10000}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}));
+      // Finde Meeting das heute oder in den letzten 7 Tagen war
+      const now=new Date();
+      const weekAgo=new Date(now.getTime()-7*24*3600*1000);
+      const currentMeeting=m.find(x=>{
+        const startDate=new Date(x.date_start);
+        const endDate=new Date(x.date_end);
+        return startDate<=now&&endDate>=weekAgo;
+      });
+      
+      if(!currentMeeting){console.log('No current meeting');return null;}
+      
+      // 2. Sessions laden
+      const s=await retry(()=>fetch('https://api.openf1.org/v1/sessions?meeting_key='+currentMeeting.meeting_key,{timeout:10000}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}));
       const sprint=s.find(x=>x.session_name==='Sprint');
-      if(!sprint){console.log('Sprint not found');return null;}
+      if(!sprint){console.log('No sprint this weekend');return null;}
       
       // 3. Positions mit Retry
       const p=await retry(()=>fetch('https://api.openf1.org/v1/position?session_key='+sprint.session_key,{timeout:10000}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}));
@@ -630,7 +640,7 @@ async function fetchF1Ergebnisse(){
     sessions.push({label:'Rennen',isRace:true,pending:true,results:[]});
   }
 
-  // ── SPRINT (Samstag) ──
+  // ── SPRINT (Samstag) - nur wenn vorhanden ──
   if(sprintData?.results?.length){
     console.log('Adding sprint to sessions');
     sessions.push({label:'Sprint (Samstag) 🔄',date:sprintData.date,isRace:false,results:sprintData.results});
