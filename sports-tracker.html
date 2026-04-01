@@ -830,7 +830,7 @@ async function fetchGolfLB(){
 }
 async function fetchGolfPlan(){
   const today=new Date().toISOString().slice(0,10);
-  const MAJORS=['masters tournament','pga championship','u.s. open','us open','the open championship','open championship'];
+  const MAJORS=['masters tournament','pga championship','u.s. open','us open','the open championship','open championship','the open'];
   function isMajor(name){const n=(name||'').toLowerCase();return MAJORS.some(m=>n.includes(m));}
   function toISO(s){
     if(!s)return '';
@@ -851,22 +851,25 @@ async function fetchGolfPlan(){
   ];
   // Try ESPN whitelist to get fuller list
   let espnEvents=[];
+  let _dbg='';
   try{
     const wl=await fetchJSON('https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/calendar/whitelist?lang=en&region=us&limit=100');
-    const entries=wl.dates||wl.eventDate?.dates||wl.events||[];
+    // sections[] = Turniere: [{id, label, startDate, endDate, event:{$ref}}]
+    const entries=wl.sections||[];
+    _dbg='espn:'+entries.length;
     for(const e of entries){
       const name=e.label||e.name||e.shortName||'';
       const start=toISO(e.startDate||e.date||'');
       const end=toISO(e.endDate||e.startDate||start);
       if(!name||!start)continue;
+      if(end<today)continue; // vergangene Turniere rausfiltern
       espnEvents.push({name:(isMajor(name)?'⭐ ':'')+name,course:e.venue?.fullName||e.venue?.name||'',date:start,end:end,major:isMajor(name)});
     }
-  }catch(e){}
-  // Use ESPN data if it has more entries, otherwise static
-  const base=espnEvents.length>STATIC.length?espnEvents:STATIC;
+  }catch(e){_dbg='ERROR:'+e.message;}
+  const base=espnEvents.length>STATIC.length?espnEvents:STATIC.filter(e=>e.end>=today);
   const src=espnEvents.length>STATIC.length?'espn':'static';
   const ev=base.slice().sort((a,b)=>a.date.localeCompare(b.date));
-  return{events:ev.map(e=>Object.assign({},e,{live:e.date<=today&&e.end>=today})),_source:src,_espnCount:espnEvents.length};
+  return{events:ev.map(e=>Object.assign({},e,{live:e.date<=today&&e.end>=today})),_source:src,_espnCount:espnEvents.length,_dbg};
 }
 async function fetchGolfTeeTimes(){
   const{event,comp}=await fetchGolfLive();
@@ -1040,8 +1043,8 @@ function rGolfPlan(d){
   const today=new Date().toISOString().slice(0,10);const nextIdx=events.findIndex(e=>e.end>=today&&!e.live);
   const src=d._source||'';
   const sourceTag=src==='espn'
-    ?'<div style="text-align:center;font-size:9px;color:#444;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">📡 Live-Kalender via ESPN ('+d._espnCount+' Turniere)</div>'
-    :'<div style="text-align:center;font-size:9px;color:#555;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">📋 Kalender (manuell gepflegt)</div>';
+    ?'<div style="text-align:center;font-size:9px;color:#444;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">📡 Live-Kalender via ESPN</div>'
+    :'<div style="text-align:center;font-size:9px;color:#555;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">📋 Kalender (Stand: Mär 2026)</div>';
   return sourceTag+events.map((e,i)=>{const date=e.date&&e.end?fd(e.date)+' – '+fd(e.end):'';const isPast=e.end<today&&!e.live;const isNext=i===nextIdx;
     return '<div class="card'+(e.live?' live-red':isNext?' live-blue':'')+'">'+
       (e.live?'<span class="badge red">● LIVE</span>':isNext?'<span class="badge blue">Nächstes Turnier</span>':'')+
