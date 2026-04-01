@@ -857,14 +857,35 @@ async function fetchGolfPlan(){
     // sections[] = Turniere: [{id, label, startDate, endDate, event:{$ref}}]
     const entries=wl.sections||[];
     _dbg='espn:'+entries.length;
+    // Erst alle Basis-Events bauen
+    const raw=[];
     for(const e of entries){
       const name=e.label||e.name||e.shortName||'';
       const start=toISO(e.startDate||e.date||'');
       const end=toISO(e.endDate||e.startDate||start);
-      if(!name||!start)continue;
-      if(end<today)continue; // vergangene Turniere rausfiltern
-      espnEvents.push({name:(isMajor(name)?'⭐ ':'')+name,course:e.venue?.fullName||e.venue?.name||'',date:start,end:end,major:isMajor(name)});
+      if(!name||!start||end<today)continue;
+      raw.push({name:(isMajor(name)?'⭐ ':'')+name,course:'',date:start,end:end,major:isMajor(name),_ref:(e.event?.$ref||'').replace(/^http:\/\//,'https://')});
     }
+    // Venue per event $ref nachladen (parallel, max 30)
+    const withVenue=await Promise.all(raw.map(async(e,i)=>{
+      if(!e._ref)return e;
+      try{
+        const ev=await fetchJSON(e._ref);
+        const venueRef=(ev.venues?.[0]||{}).$ref;
+        if(venueRef){
+          const v=await fetchJSON(venueRef.replace(/^http:\/\//,'https://'));
+          const vname=v.fullName||v.name||'';
+          const city=v.address?.city||'';
+          const state=v.address?.state||'';
+          const country=v.address?.country||'';
+          const loc=[city,state||country].filter(Boolean).join(', ');
+          e.course=[vname,loc].filter(Boolean).join(', ');
+        }
+      }catch(_){}
+      delete e._ref;
+      return e;
+    }));
+    espnEvents.push(...withVenue);
   }catch(e){_dbg='ERROR:'+e.message;}
   const base=espnEvents.length>STATIC.length?espnEvents:STATIC.filter(e=>e.end>=today);
   const src=espnEvents.length>STATIC.length?'espn':'static';
