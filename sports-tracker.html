@@ -134,7 +134,7 @@ const SPORTS=[
   {id:'bundesliga',label:'Fußball',icon:'⚽',tabs:['-1','Spieltag','+1','Tabelle','DFB','Europa']},
   {id:'f1',label:'Formel 1',icon:'🏎️',tabs:['Kalender','Ergebnisse','Fahrer','Teams']},
   {id:'tennis',label:'Tennis',icon:'🎾',tabs:['ATP','WTA']},
-  {id:'golf',label:'Golf',icon:'⛳',tabs:['Leaderboard','Turniere','Tee-Times']},
+  {id:'golf',label:'Golf',icon:'⛳',tabs:['Leaderboard','Tee-Times','Kalender']},
   {id:'streams',label:'Streams',icon:'📺',tabs:[]},
 ];
 
@@ -202,7 +202,7 @@ function render(){
     bundesliga_5:d=>rEuropa(d,euroSub.tab),
     f1_0:rF1Kalender, f1_1:rF1Ergebnisse, f1_2:rF1Fahrer, f1_3:rF1Teams,
     tennis_0:d=>rTennis(d,tennisSub.tab), tennis_1:d=>rTennis(d,tennisSub.tab),
-    golf_0:rGolfLB, golf_1:rGolfPlan, golf_2:rGolfTeeTimes
+    golf_0:rGolfLB, golf_1:rGolfTeeTimes, golf_2:rGolfPlan
   };
   content.innerHTML=(R[k]||function(){return '<div class="empty">Keine Daten</div>';})(d);
 
@@ -830,8 +830,43 @@ async function fetchGolfLB(){
 }
 async function fetchGolfPlan(){
   const today=new Date().toISOString().slice(0,10);
-  const ev=[{name:'Arnold Palmer Invitational',course:'Bay Hill Club & Lodge, Orlando FL',date:'2026-03-05',end:'2026-03-08',major:false},{name:'The Players Championship',course:'TPC Sawgrass, Ponte Vedra Beach FL',date:'2026-03-12',end:'2026-03-15',major:false},{name:'Valspar Championship',course:'Innisbrook Resort, FL',date:'2026-03-19',end:'2026-03-22',major:false},{name:"Texas Children's Houston Open",course:'Memorial Park Golf Course, Houston TX',date:'2026-03-26',end:'2026-03-29',major:false},{name:'Valero Texas Open',course:'TPC San Antonio, TX',date:'2026-04-02',end:'2026-04-05',major:false},{name:'⭐ Masters Tournament',course:'Augusta National, Augusta GA',date:'2026-04-09',end:'2026-04-12',major:true},{name:'RBC Heritage',course:'Harbour Town Golf Links, Hilton Head Island SC',date:'2026-04-16',end:'2026-04-19',major:false},{name:'⭐ PGA Championship',course:'Aronimink Golf Club, Pennsylvania',date:'2026-05-14',end:'2026-05-17',major:true},{name:'⭐ U.S. Open',course:'Oakmont Country Club, Pennsylvania',date:'2026-06-18',end:'2026-06-21',major:true},{name:'⭐ The Open Championship',course:'Royal Birkdale, Southport, England',date:'2026-07-16',end:'2026-07-19',major:true}];
-  return{events:ev.map(e=>Object.assign({},e,{live:e.date<=today&&e.end>=today}))};
+  const MAJORS=['masters tournament','pga championship','u.s. open','us open','the open championship','open championship'];
+  function isMajor(name){const n=(name||'').toLowerCase();return MAJORS.some(m=>n.includes(m));}
+  function toISO(s){
+    if(!s)return '';
+    if(/^\d{8}$/.test(s))return s.slice(0,4)+'-'+s.slice(4,6)+'-'+s.slice(6,8);
+    return String(s).slice(0,10);
+  }
+  // Complete static list as reliable base — always shown
+  const STATIC=[
+    {name:'⭐ Masters Tournament',course:'Augusta National, Augusta GA',date:'2026-04-09',end:'2026-04-12',major:true},
+    {name:'RBC Heritage',course:'Harbour Town Golf Links, Hilton Head Island SC',date:'2026-04-16',end:'2026-04-19',major:false},
+    {name:'Zurich Classic of New Orleans',course:'TPC Louisiana, Avondale LA',date:'2026-04-23',end:'2026-04-26',major:false},
+    {name:'Cadillac Championship',course:'',date:'2026-04-30',end:'2026-05-03',major:false},
+    {name:'Truist Championship',course:'',date:'2026-05-07',end:'2026-05-10',major:false},
+    {name:'ONEflight Myrtle Beach Classic',course:'',date:'2026-05-07',end:'2026-05-10',major:false},
+    {name:'⭐ PGA Championship',course:'Aronimink Golf Club, Pennsylvania',date:'2026-05-14',end:'2026-05-17',major:true},
+    {name:'⭐ U.S. Open',course:'Oakmont Country Club, Pennsylvania',date:'2026-06-18',end:'2026-06-21',major:true},
+    {name:'⭐ The Open Championship',course:'Royal Birkdale, Southport, England',date:'2026-07-16',end:'2026-07-19',major:true},
+  ];
+  // Try ESPN whitelist to get fuller list
+  let espnEvents=[];
+  try{
+    const wl=await fetchJSON('https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/calendar/whitelist?lang=en&region=us&limit=100');
+    const entries=wl.dates||wl.eventDate?.dates||wl.events||[];
+    for(const e of entries){
+      const name=e.label||e.name||e.shortName||'';
+      const start=toISO(e.startDate||e.date||'');
+      const end=toISO(e.endDate||e.startDate||start);
+      if(!name||!start)continue;
+      espnEvents.push({name:(isMajor(name)?'⭐ ':'')+name,course:e.venue?.fullName||e.venue?.name||'',date:start,end:end,major:isMajor(name)});
+    }
+  }catch(e){}
+  // Use ESPN data if it has more entries, otherwise static
+  const base=espnEvents.length>STATIC.length?espnEvents:STATIC;
+  const src=espnEvents.length>STATIC.length?'espn':'static';
+  const ev=base.slice().sort((a,b)=>a.date.localeCompare(b.date));
+  return{events:ev.map(e=>Object.assign({},e,{live:e.date<=today&&e.end>=today})),_source:src,_espnCount:espnEvents.length};
 }
 async function fetchGolfTeeTimes(){
   const{event,comp}=await fetchGolfLive();
@@ -854,7 +889,7 @@ const LOADERS={
   bundesliga_5:fetchEuropa,  // CL + EL + DFB in einem Request
   f1_0:fetchF1Kalender, f1_1:fetchF1Ergebnisse, f1_2:fetchF1Fahrer, f1_3:fetchF1Teams,
   tennis_0:fetchTennisATP, tennis_1:fetchTennisWTA,
-  golf_0:()=>fetchGolfLB(), golf_1:()=>fetchGolfPlan(), golf_2:()=>fetchGolfTeeTimes()
+  golf_0:()=>fetchGolfLB(), golf_1:()=>fetchGolfTeeTimes(), golf_2:()=>fetchGolfPlan()
 };
 async function load(sport,tab){const k=sport+'_'+tab;if(busy[k])return;busy[k]=true;render();try{cache[k]=await LOADERS[k]();ts[k]=new Date();}catch(e){cache[k]={_err:e.message||'Ladefehler'};}busy[k]=false;render();}
 
@@ -1003,7 +1038,11 @@ function rGolfLB(d){
 function rGolfPlan(d){
   const events=d.events||[];if(!events.length)return '<div class="empty">Keine Turniere</div>';
   const today=new Date().toISOString().slice(0,10);const nextIdx=events.findIndex(e=>e.end>=today&&!e.live);
-  return events.map((e,i)=>{const date=e.date&&e.end?fd(e.date)+' – '+fd(e.end):'';const isPast=e.end<today&&!e.live;const isNext=i===nextIdx;
+  const src=d._source||'';
+  const sourceTag=src==='espn'
+    ?'<div style="text-align:center;font-size:9px;color:#444;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">📡 Live-Kalender via ESPN ('+d._espnCount+' Turniere)</div>'
+    :'<div style="text-align:center;font-size:9px;color:#555;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">📋 Kalender (manuell gepflegt)</div>';
+  return sourceTag+events.map((e,i)=>{const date=e.date&&e.end?fd(e.date)+' – '+fd(e.end):'';const isPast=e.end<today&&!e.live;const isNext=i===nextIdx;
     return '<div class="card'+(e.live?' live-red':isNext?' live-blue':'')+'">'+
       (e.live?'<span class="badge red">● LIVE</span>':isNext?'<span class="badge blue">Nächstes Turnier</span>':'')+
       (e.major?'<span class="major-badge">MAJOR</span>':'')+
