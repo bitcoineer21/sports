@@ -276,8 +276,10 @@ async function fetchBLSpieltag(){
         evMap[(home.team?.displayName||'')+'|'+(away.team?.displayName||'')]={hs:isNaN(hs)?null:hs,as:isNaN(as_)?null:as_,status:comp.status?.type?.completed?'finished':comp.status?.type?.state==='in'?'live':'upcoming',clock:comp.status?.displayClock||''};
       });
       games=games.map(g=>{
+        function normalize(n){return(n||'').toLowerCase().replace(/ü/g,'ue').replace(/ö/g,'oe').replace(/ä/g,'ae').replace(/ß/g,'ss').replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();}
+        function tokenMatch(a,b){const ta=normalize(a).split(' ').filter(t=>t.length>=3&&!/^\d+$/.test(t)),tb=normalize(b).split(' ').filter(t=>t.length>=3&&!/^\d+$/.test(t));return ta.some(t=>tb.includes(t));}
         let bestKey=null,bestScore=0;
-        Object.keys(evMap).forEach(k=>{const[h,a]=k.split('|');let s=0;if(h&&g.home&&(h.includes(g.home.split(' ').pop())||g.home.includes(h.split(' ').pop())))s+=2;if(a&&g.away&&(a.includes(g.away.split(' ').pop())||g.away.includes(a.split(' ').pop())))s+=2;if(s>bestScore){bestScore=s;bestKey=k;}});
+        Object.keys(evMap).forEach(k=>{const[h,a]=k.split('|');let s=0;if(tokenMatch(h,g.home))s+=2;if(tokenMatch(a,g.away))s+=2;if(s>bestScore){bestScore=s;bestKey=k;}});
         if(bestKey&&bestScore>=3){const e=evMap[bestKey];if(e.status==='live'||e.status==='finished')return Object.assign({},g,{hs:e.hs!==null?e.hs:g.hs,as:e.as!==null?e.as:g.as,status:e.status,clock:e.clock});}
         return g;
       });
@@ -372,7 +374,7 @@ function parseSoccer(events, leagueName=''){
         let legInfo='';
         for(const note of notes){
           if(note.includes('1st Leg')||note.includes('2nd Leg')||note.includes('Leg')){
-            legInfo=note;break;
+            legInfo=note.replace('1st Leg','Hinspiel').replace('2nd Leg','Rückspiel');break;
           }
         }
         
