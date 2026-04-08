@@ -313,7 +313,8 @@ function parseSoccer(events, leagueName=''){
       if(diffMinutes>0&&diffMinutes<120)displayClock=diffMinutes+"'";
     }
     
-    return{home:t1?.team?.displayName||'?',away:t2?.team?.displayName||'?',
+    function deTeam(n){return(n||'').replace(/Quarterfinal\s+(\d+)\s+Winner/gi,'Sieger VF$1').replace(/Semifinal\s+(\d+)\s+Winner/gi,'Sieger HF$1');}
+    return{home:deTeam(t1?.team?.displayName)||'?',away:deTeam(t2?.team?.displayName)||'?',
       hs:(done||live)?Number(t1?.score||0):null,as:(done||live)?Number(t2?.score||0):null,
       status:done?'finished':live?'live':'upcoming',
       clock:displayClock,
@@ -363,10 +364,12 @@ function parseSoccer(events, leagueName=''){
         // Champions/Europa Liga: Runde nach Datum auf Deutsch bestimmen
         if(!roundInfo && (leagueName.includes('UEFA')||leagueName.includes('CHAMPIONS')||leagueName.includes('EUROPA'))){
           const month=dateStr.slice(5,7);
+          const day=parseInt(dateStr.slice(8,10),10);
           if(month==='02')roundInfo='Playoffs';
           else if(month==='03')roundInfo='Achtelfinale';
-          else if(month==='04')roundInfo='Viertelfinale';
-          else if(month==='05'&&dateStr<'2026-05-20')roundInfo='Halbfinale';
+          else if(month==='04'&&day<=20)roundInfo='Viertelfinale';
+          else if(month==='04'&&day>20)roundInfo='Halbfinale';
+          else if(month==='05'&&dateStr<'2026-05-25')roundInfo='Halbfinale';
           else if(month==='05'||month==='06')roundInfo='Finale';
         }
         
@@ -377,12 +380,31 @@ function parseSoccer(events, leagueName=''){
             legInfo=note.replace('1st Leg','Hinspiel').replace('2nd Leg','Rückspiel');break;
           }
         }
+        // Englische ESPN-Zusatztexte übersetzen
+        function deESPN(s){return s
+          .replace(/tied on aggregate/gi,'Gleichstand n. Hin-\/Rückspiel')
+          .replace(/([\w\s.'-]+?)\s+lead[s]?\s+([\d-]+)\s+on penalties/gi,'$1 führt $2 n.E.')
+          .replace(/([\w\s.'-]+?)\s+lead[s]?\s+([\d-]+)\s+on aggregate/gi,'$1 führt $2 n. Gesamtergebnis')
+          .replace(/([\w\s.'-]+?)\s+lead[s]?\s+([\d-]+)\s+on extra time/gi,'$1 führt $2 n.V.')
+          .replace(/([\w\s.'-]+?)\s+advance[s]?\s+([\d-]+)\s+on penalties/gi,'$1 weiter, $2 n.E.')
+          .replace(/([\w\s.'-]+?)\s+advance[s]?\s+([\d-]+)\s+on aggregate/gi,'$1 weiter, $2 n. Gesamtergebnis')
+          .replace(/([\w\s.'-]+?)\s+advance[s]?\s+([\d-]+)\s+on extra time/gi,'$1 weiter, $2 n.V.')
+          .replace(/([\w\s.'-]+?)\s+advance[s]?/gi,'$1 weiter')
+          .replace(/Quarterfinal\s+(\d+)\s+Winner/gi,'Sieger VF$1')
+          .replace(/Semifinal\s+(\d+)\s+Winner/gi,'Sieger HF$1')
+          .replace(/\bon aggregate\b/gi,'n. Gesamtergebnis')
+          .replace(/\bon penalties\b/gi,'n.E.')
+          .replace(/\bextra time\b/gi,'n.V.')
+          .replace(/\bpenalties\b/gi,'n.E.');
+        }
+        if(legInfo)legInfo=deESPN(legInfo);
+        if(roundInfo)roundInfo=deESPN(roundInfo);
         
         // Kombiniere alles
         if(roundInfo&&legInfo)return roundInfo+' · '+legInfo;
         else if(roundInfo)return roundInfo;
         else if(legInfo)return legInfo;
-        else return notes.join(' · ')||'';
+        else return notes.map(deESPN).join(' · ')||'';
       })(),
       date:dateStr||null,time:c?.date?ft(c.date):null};
   });
@@ -399,21 +421,62 @@ async function fetchSoccerMultiDate(league,dates){
   return[...live,...finished,...upcoming];
 }
 
+async function fetchSoccerSeason(league){
+  // Holt alle Spiele einer Saison dynamisch über den ESPN-Kalender
+  const base='https://site.web.api.espn.com/apis/site/v2/sports/soccer/'+league+'/scoreboard';
+  const allGames=[],seen=new Set();
+  function addGames(gs){gs.forEach(g=>{const k=g.home+'|'+g.away+'|'+g.date;if(!seen.has(k)){seen.add(k);allGames.push(g);}});}
+
+  // Schritt 1: Kalender-Whitelist holen → alle Spieltage der Saison
+  try{
+    const calUrl='https://sports.core.api.espn.com/v2/sports/soccer/leagues/'+league+'/calendar/whitelist?lang=en&region=us&limit=500';
+    const cal=await safeFetch(calUrl);
+    const dates=(cal.eventDate?.dates||cal.dates||cal.sections||[])
+      .map(d=>typeof d==='string'?d.slice(0,10).replace(/-/g,''):d.startDate?d.startDate.slice(0,10).replace(/-/g,''):null)
+      .filter(Boolean);
+    if(dates.length>0){
+      // Nur relevante Daten laden (ab 3 Monate zurück, bis 6 Monate voraus)
+      const now=new Date(),from=new Date(now.getFullYear(),now.getMonth()-3,1),to=new Date(now.getFullYear(),now.getMonth()+6,30);
+      const relevant=dates.filter(d=>{const dt=new Date(d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8));return dt>=from&&dt<=to;});
+      // Dedupliziere auf Wochen um API-Calls zu reduzieren
+      const weeks=new Set(relevant.map(d=>d.slice(0,6)+'01'));
+      const uniqueDates=[...new Set([...relevant,...weeks])].slice(0,40);
+      const results=await Promise.all(uniqueDates.map(d=>safeFetch(base+'?limit=100&dates='+d).then(j=>parseSoccer(j.events||[],league)).catch(()=>[])));
+      results.forEach(gs=>addGames(gs));
+      if(allGames.length>0){
+        const live=allGames.filter(g=>g.status==='live');
+        const finished=allGames.filter(g=>g.status==='finished').sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+        const upcoming=allGames.filter(g=>g.status==='upcoming').sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+        return[...live,...finished,...upcoming];
+      }
+    }
+  }catch(e){}
+
+  // Fallback: aktuellen Monat ±2 Monate scannen (täglich wäre zu viel, daher nur bekannte Spieltage)
+  const now=new Date();
+  const fallbackDates=[];
+  for(let w=-12;w<=24;w++){
+    const d=new Date(now.getTime()+w*7*24*3600*1000);
+    // Dienstag, Mittwoch, Donnerstag — UEFA spielt hauptsächlich Di-Do
+    [2,3,4].forEach(dow=>{
+      const day=new Date(d);day.setDate(d.getDate()-(d.getDay()-dow+7)%7);
+      const s=day.getFullYear()+String(day.getMonth()+1).padStart(2,'0')+String(day.getDate()).padStart(2,'0');
+      fallbackDates.push(s);
+    });
+  }
+  const uniq=[...new Set(fallbackDates)].sort();
+  const results=await Promise.all(uniq.map(d=>safeFetch(base+'?limit=100&dates='+d).then(j=>parseSoccer(j.events||[],league)).catch(()=>[])));
+  results.forEach(gs=>addGames(gs));
+  const live=allGames.filter(g=>g.status==='live');
+  const finished=allGames.filter(g=>g.status==='finished').sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const upcoming=allGames.filter(g=>g.status==='upcoming').sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  return[...live,...finished,...upcoming];
+}
+
 async function fetchEuropa(){
-  // Lädt CL, EL und DFB parallel in einem einzigen Cache-Eintrag
   const [clGames,elGames,dfbGames]=await Promise.all([
-    fetchSoccerMultiDate('UEFA.CHAMPIONS',[
-      '20260211','20260212','20260217','20260218','20260219','20260224','20260225',
-      '20260310','20260311','20260317','20260318',
-      '20260407','20260408','20260414','20260415',
-      '20260421','20260422','20260423','20260424','20260425','20260426'
-    ]),
-    fetchSoccerMultiDate('UEFA.EUROPA',[
-      '20260219','20260220','20260226','20260227',
-      '20260312','20260313','20260319','20260320',
-      '20260409','20260410','20260416','20260417',
-      '20260421','20260422','20260423','20260424','20260425','20260426'
-    ]),
+    fetchSoccerSeason('UEFA.CHAMPIONS'),
+    fetchSoccerSeason('UEFA.EUROPA'),
     fetchSoccerMultiDate('ger.dfb_pokal',[
       '20260203','20260204','20260210','20260211',
       '20260318','20260319','20260320','20260321','20260322',
