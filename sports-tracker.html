@@ -228,17 +228,27 @@ function parseGames(gs){
   return(gs||[]).map(g=>{
     const resFinal=(g.matchResults||[]).find(r=>r.resultTypeID===2);
     const resHZ=(g.matchResults||[]).find(r=>r.resultTypeID===1);
-    const kickoff=g.matchDateTime?new Date(g.matchDateTime).getTime():0;
+    // OpenLigaDB liefert Zeiten ohne Timezone-Suffix → als UTC behandeln
+    const dtRaw=g.matchDateTime||null;
+    const dtStr=dtRaw?(dtRaw.includes('Z')||dtRaw.includes('+'))?dtRaw:dtRaw+'Z':null;
+    const kickoff=dtStr?new Date(dtStr).getTime():0;
     const minsElapsed=kickoff?(now-kickoff)/60000:-1;
     const timeLive=!g.matchIsFinished&&kickoff>0&&minsElapsed>=0&&minsElapsed<115;
     const isLive=!g.matchIsFinished&&timeLive;
     const res=resFinal||(isLive?resHZ:null);
+    let clock='';
+    if(isLive&&minsElapsed>=0){
+      if(minsElapsed<=47)clock=Math.min(45,Math.floor(minsElapsed))+(minsElapsed>45?'+'+(Math.floor(minsElapsed-45)):'')+"'";
+      else if(minsElapsed<62)clock='HZ';
+      else{const m2=minsElapsed-62;clock=Math.min(90,45+Math.floor(m2))+(m2>45?'+'+(Math.floor(m2-45)):'')+"'";}
+    }
     return{home:g.team1?.teamName,away:g.team2?.teamName,
       hs:g.matchIsFinished?(resFinal?resFinal.pointsTeam1:null):isLive?(res?res.pointsTeam1:0):null,
       as:g.matchIsFinished?(resFinal?resFinal.pointsTeam2:null):isLive?(res?res.pointsTeam2:0):null,
       status:g.matchIsFinished?'finished':isLive?'live':'upcoming',
-      date:g.matchDateTime?g.matchDateTime.slice(0,10):null,
-      time:g.matchDateTime?ft(g.matchDateTime):null};
+      clock,
+      date:dtStr?new Date(dtStr).toISOString().slice(0,10):null,
+      time:dtStr?ft(dtStr):null};
   });
 }
 
@@ -291,6 +301,7 @@ async function fetchBLAll(){
       function norm2(n){return(n||'').toLowerCase().replace(/ü/g,'ue').replace(/ö/g,'oe').replace(/ä/g,'ae').replace(/ß/g,'ss').replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();}
       function tok(a,b){const ta=norm2(a).split(' ').filter(t=>t.length>=3&&!/^\d+$/.test(t)),tb=norm2(b).split(' ').filter(t=>t.length>=3&&!/^\d+$/.test(t));return ta.some(t=>tb.some(u=>t.startsWith(u)||u.startsWith(t)));}
       curGames=curGames.map(g=>{
+        if(g.date!==todayStr)return g; // Nur heutige Spiele mit ESPN mergen
         let bestKey=null,bestScore=0;
         Object.keys(evMap).forEach(k=>{const[h,a]=k.split('|');let s=0;if(tok(h,g.home))s+=2;if(tok(a,g.away))s+=2;if(s>bestScore){bestScore=s;bestKey=k;}});
         if(bestKey&&bestScore>=2){const e=evMap[bestKey];if(e.status==='live'||e.status==='finished')return Object.assign({},g,{hs:e.hs!==null?e.hs:g.hs,as:e.as!==null?e.as:g.as,status:e.status,clock:e.clock});}
@@ -795,16 +806,16 @@ async function fetchTennisLive(league){
   if(!rankings.length)rankings=STATIC_RANKINGS[league]||[];
   {
     const today=new Date().toISOString().slice(0,10);
-    // Aktives Turnier aus ESPN-Daten erkennen
+    // Aktives Turnier aus ESPN: alle Matches/Results BEVOR gefiltert wird
     const activeTourns=new Set([...results,...matches].map(m=>m.tourn).filter(Boolean).map(t=>t.toLowerCase()));
     const STATIC_CAL={
-      atp:[{name:'Monte-Carlo Masters',city:'Monte-Carlo',cat:'Masters 1000',date:'2026-04-05',end:'2026-04-12'},{name:'Barcelona Open',city:'Barcelona',cat:'ATP 500',date:'2026-04-13',end:'2026-04-19'},{name:'Madrid Open',city:'Madrid',cat:'Masters 1000',date:'2026-04-22',end:'2026-05-03'},{name:"Internazionali BNL d'Italia",city:'Rome',cat:'Masters 1000',date:'2026-05-06',end:'2026-05-17'},{name:'Roland Garros',city:'Paris',cat:'Grand Slam',date:'2026-05-24',end:'2026-06-07'},{name:'Halle Open',city:'Halle',cat:'ATP 500',date:'2026-06-08',end:'2026-06-14'},{name:'Wimbledon',city:'London',cat:'Grand Slam',date:'2026-06-29',end:'2026-07-12'},{name:'US Open',city:'New York',cat:'Grand Slam',date:'2026-08-31',end:'2026-09-13'}],
-      wta:[{name:'Porsche Tennis Grand Prix',city:'Stuttgart',cat:'WTA 500',date:'2026-04-20',end:'2026-04-26'},{name:'Madrid Open',city:'Madrid',cat:'WTA 1000',date:'2026-04-22',end:'2026-05-03'},{name:"Internazionali BNL d'Italia",city:'Rome',cat:'WTA 1000',date:'2026-05-06',end:'2026-05-17'},{name:'Roland Garros',city:'Paris',cat:'Grand Slam',date:'2026-05-24',end:'2026-06-07'},{name:'Wimbledon',city:'London',cat:'Grand Slam',date:'2026-06-29',end:'2026-07-12'},{name:'US Open',city:'New York',cat:'Grand Slam',date:'2026-08-31',end:'2026-09-13'}]
+      atp:[{name:'Barcelona Open',city:'Barcelona',cat:'ATP 500',date:'2026-04-13',end:'2026-04-19'},{name:'Madrid Open',city:'Madrid',cat:'Masters 1000',date:'2026-04-22',end:'2026-05-03'},{name:"Internazionali BNL d'Italia",city:'Rome',cat:'Masters 1000',date:'2026-05-06',end:'2026-05-17'},{name:'Roland Garros',city:'Paris',cat:'Grand Slam',date:'2026-05-24',end:'2026-06-07'},{name:'Halle Open',city:'Halle',cat:'ATP 500',date:'2026-06-08',end:'2026-06-14'},{name:'Wimbledon',city:'London',cat:'Grand Slam',date:'2026-06-29',end:'2026-07-12'},{name:'US Open',city:'New York',cat:'Grand Slam',date:'2026-08-31',end:'2026-09-13'}],
+      wta:[{name:'Porsche Tennis Grand Prix',city:'Stuttgart',cat:'WTA 500',date:'2026-04-14',end:'2026-04-20'},{name:'Madrid Open',city:'Madrid',cat:'WTA 1000',date:'2026-04-22',end:'2026-05-03'},{name:"Internazionali BNL d'Italia",city:'Rome',cat:'WTA 1000',date:'2026-05-06',end:'2026-05-17'},{name:'Roland Garros',city:'Paris',cat:'Grand Slam',date:'2026-05-24',end:'2026-06-07'},{name:'Wimbledon',city:'London',cat:'Grand Slam',date:'2026-06-29',end:'2026-07-12'},{name:'US Open',city:'New York',cat:'Grand Slam',date:'2026-08-31',end:'2026-09-13'}]
     };
     kalender=(STATIC_CAL[league]||[]).map(e=>{
       const byDate=e.date<=today&&e.end>=today;
-      const byName=activeTourns.size>0&&[...activeTourns].some(t=>t.includes(e.name.toLowerCase())||e.name.toLowerCase().includes(t));
-      return Object.assign({},e,{surf:'',live:byDate||byName});
+      const byESPN=activeTourns.size>0&&[...activeTourns].some(t=>t.includes(e.name.toLowerCase().slice(0,8))||e.name.toLowerCase().includes(t.slice(0,8)));
+      return Object.assign({},e,{surf:'',live:byDate||byESPN});
     });
   }
   const BIG_CATS=['Masters 1000','ATP 500','WTA 1000','WTA 500','Grand Slam'];
