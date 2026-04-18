@@ -119,8 +119,9 @@ async function safeFetch(url,timeout=12000){
   const ctrl=new AbortController();
   const tid=setTimeout(()=>ctrl.abort(),timeout);
   try{
-    const r=await fetch(url,{cache:'no-store',signal:ctrl.signal});
+    const r=await fetch(url,{signal:ctrl.signal});
     clearTimeout(tid);
+    if(r.status===429)throw new Error('HTTP 429');
     if(!r.ok)throw new Error('HTTP '+r.status);
     const t=await r.text();
     if(!t||!t.trim())throw new Error('Leere Antwort');
@@ -163,7 +164,7 @@ function render(){
   const linkList=links[state.cur]||[];
   el('hdr-title').innerHTML=esc(sp.icon+' '+sp.label)+linkList.map(l=>' <a class="hdr-link" href="'+l.url+'" target="_blank" rel="noopener">'+l.label+'</a>').join('');
   el('btn-refresh').style.display=state.cur==='streams'?'none':'';
-  el('hdr-upd').textContent=ts[k]?'Stand: '+ts[k].toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})+' Uhr':'';
+  el('hdr-upd').textContent=ts[CACHE_ALIAS[k]||k]?'Stand: '+ts[CACHE_ALIAS[k]||k].toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})+' Uhr':'';
   el('btn-refresh').classList.toggle('spinning',!!busy[k]);
 
   const tabsBar=el('tabs-bar');tabsBar.innerHTML='';
@@ -190,8 +191,9 @@ function render(){
 
   const content=el('content');
   if(state.cur==='streams'){rStreams(content);return;}
-  if(busy[k]){content.innerHTML='<div class="loader"><div class="spin-ring"></div><div class="ltext">Lade…</div></div>';return;}
-  const d=cache[k];
+  const ck=CACHE_ALIAS[k]||k;
+  if(busy[ck]){content.innerHTML='<div class="loader"><div class="spin-ring"></div><div class="ltext">Lade…</div></div>';return;}
+  const d=cache[ck];
   if(!d){content.innerHTML='<div class="empty">Keine Daten geladen</div>';return;}
   if(d._err){content.innerHTML='<div class="errbox"><div class="errmsg">⚠️ '+esc(d._err)+'</div><button class="btn-retry" onclick="refresh()">Erneut versuchen</button></div>';return;}
 
@@ -240,35 +242,42 @@ function parseGames(gs){
   });
 }
 
+let _getBLCache=null;
 async function getBL(){
-  const now=new Date(),nowMs=now.getTime();
+  if(_getBLCache)return _getBLCache;
+  const now=new Date();
   const season=(now.getMonth()>=6)?now.getFullYear():now.getFullYear()-1;
   let md=0;
   try{
-    const candidates=await Promise.all(
-      Array.from({length:17},(_,i)=>i+18).map(n=>
-        safeFetch('https://api.openligadb.de/getmatchdata/bl1/'+season+'/'+n)
-          .then(gs=>{
-            const times=gs.map(g=>g.matchDateTime?new Date(g.matchDateTime).getTime():null).filter(Boolean);
-            if(!times.length)return{n,dist:Infinity};
-            const sorted=times.slice().sort((a,b)=>a-b);
-            return{n,dist:Math.abs(sorted[Math.floor(sorted.length/2)]-nowMs)};
-          }).catch(()=>({n,dist:Infinity}))
-      )
-    );
-    const best=candidates.reduce((a,b)=>a.dist<=b.dist?a:b);
-    if(best.dist<Infinity)md=best.n;
+    // Direkt aktuellen Spieltag abfragen — ein einziger Request
+    const cur=await safeFetch('https://api.openligadb.de/getmatchdata/bl1');
+    md=Number(cur[0]?.group?.groupOrderID||0);
   }catch(e){}
-  if(!md){try{const cur=await safeFetch('https://api.openligadb.de/getmatchdata/bl1');md=Number(cur[0]?.group?.groupOrderID||0);}catch(e){}}
-  return{md:md||25,season};
+  _getBLCache={md:md||28,season};
+  // Cache nach 10 Min zurücksetzen
+  setTimeout(()=>{_getBLCache=null;},600000);
+  return _getBLCache;
 }
 
-async function fetchBLSpieltag(){
+// Geteilter Cache für alle BL-Tabs
+let _blCache=null;
+let _blCacheTs=0;
+async function fetchBLAll(){
+  // Nur alle 5 Minuten neu laden
+  if(_blCache&&Date.now()-_blCacheTs<300000)return _blCache;
   const{md,season}=await getBL();
-  const cur=await safeFetch('https://api.openligadb.de/getmatchdata/bl1/'+season+'/'+md);
-  let games=parseGames(cur);
   const todayStr=new Date().toISOString().slice(0,10);
-  if(games.some(g=>g.date===todayStr)){
+  // Alle 3 Spieltage + Tabelle parallel von OpenLigaDB (1 Quelle, kein Rate-Limit)
+  const prev=md>1?md-1:1;
+  const [curRaw,prevRaw,nextRaw,tableRaw]=await Promise.all([
+    safeFetch('https://api.openligadb.de/getmatchdata/bl1/'+season+'/'+md).catch(()=>[]),
+    safeFetch('https://api.openligadb.de/getmatchdata/bl1/'+season+'/'+prev).catch(()=>[]),
+    safeFetch('https://api.openligadb.de/getmatchdata/bl1/'+season+'/'+(md+1)).catch(()=>[]),
+    safeFetch('https://api.openligadb.de/getbltable/bl1/'+season).catch(()=>[]),
+  ]);
+  let curGames=parseGames(curRaw);
+  // Einmalig ESPN für Live-Scores wenn heute Spieltag
+  if(curGames.some(g=>g.date===todayStr)){
     try{
       const espn=await fetchJSON('https://site.web.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard');
       const evMap={};
@@ -279,19 +288,30 @@ async function fetchBLSpieltag(){
         const hs=parseInt(home.score||'',10),as_=parseInt(away.score||'',10);
         evMap[(home.team?.displayName||'')+'|'+(away.team?.displayName||'')]={hs:isNaN(hs)?null:hs,as:isNaN(as_)?null:as_,status:comp.status?.type?.completed?'finished':comp.status?.type?.state==='in'?'live':'upcoming',clock:comp.status?.displayClock||''};
       });
-      games=games.map(g=>{
+      function norm2(n){return(n||'').toLowerCase().replace(/ü/g,'ue').replace(/ö/g,'oe').replace(/ä/g,'ae').replace(/ß/g,'ss').replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();}
+      function tok(a,b){const ta=norm2(a).split(' ').filter(t=>t.length>=3&&!/^\d+$/.test(t)),tb=norm2(b).split(' ').filter(t=>t.length>=3&&!/^\d+$/.test(t));return ta.some(t=>tb.some(u=>t.startsWith(u)||u.startsWith(t)));}
+      curGames=curGames.map(g=>{
         let bestKey=null,bestScore=0;
-        Object.keys(evMap).forEach(k=>{const[h,a]=k.split('|');let s=0;if(h&&g.home&&(h.includes(g.home.split(' ').pop())||g.home.includes(h.split(' ').pop())))s+=2;if(a&&g.away&&(a.includes(g.away.split(' ').pop())||g.away.includes(a.split(' ').pop())))s+=2;if(s>bestScore){bestScore=s;bestKey=k;}});
-        if(bestKey&&bestScore>=3){const e=evMap[bestKey];if(e.status==='live'||e.status==='finished')return Object.assign({},g,{hs:e.hs!==null?e.hs:g.hs,as:e.as!==null?e.as:g.as,status:e.status,clock:e.clock});}
+        Object.keys(evMap).forEach(k=>{const[h,a]=k.split('|');let s=0;if(tok(h,g.home))s+=2;if(tok(a,g.away))s+=2;if(s>bestScore){bestScore=s;bestKey=k;}});
+        if(bestKey&&bestScore>=2){const e=evMap[bestKey];if(e.status==='live'||e.status==='finished')return Object.assign({},g,{hs:e.hs!==null?e.hs:g.hs,as:e.as!==null?e.as:g.as,status:e.status,clock:e.clock});}
         return g;
       });
     }catch(e){}
   }
-  return{md,games,hasLiveGames:games.some(g=>g.status==='live'||(g.date===todayStr&&g.status!=='finished'))};
+  const rows=(tableRaw||[]).map((t,i)=>({pos:i+1,team:t.teamName,played:t.matches,pts:t.points,gd:t.goalDiff}));
+  _blCache={
+    spieltag:{md,games:curGames,hasLiveGames:curGames.some(g=>g.status==='live'||(g.date===todayStr&&g.status!=='finished'))},
+    letzter:{md:prev,games:parseGames(prevRaw)},
+    naechster:{md:md+1,games:parseGames(nextRaw)},
+    tabelle:{rows},
+  };
+  _blCacheTs=Date.now();
+  return _blCache;
 }
-async function fetchBLLetzter(){const{md,season}=await getBL();const prev=md>1?md-1:1;return{md:prev,games:parseGames(await safeFetch('https://api.openligadb.de/getmatchdata/bl1/'+season+'/'+prev))};}
-async function fetchBLNaechster(){const{md,season}=await getBL();return{md:md+1,games:parseGames(await safeFetch('https://api.openligadb.de/getmatchdata/bl1/'+season+'/'+(md+1)))};}
-async function fetchBLTabelle(){const{season}=await getBL();const rows=await safeFetch('https://api.openligadb.de/getbltable/bl1/'+season);return{rows:(rows||[]).map((t,i)=>({pos:i+1,team:t.teamName,played:t.matches,pts:t.points,gd:t.goalDiff}))}}
+async function fetchBLSpieltag(){return(await fetchBLAll()).spieltag;}
+async function fetchBLLetzter(){return(await fetchBLAll()).letzter;}
+async function fetchBLNaechster(){return(await fetchBLAll()).naechster;}
+async function fetchBLTabelle(){return(await fetchBLAll()).tabelle;}
 
 // ─── CL / EL / DFB ───────────────────────────────────────
 function parseSoccer(events, leagueName=''){
@@ -330,45 +350,33 @@ function parseSoccer(events, leagueName=''){
         const unique=new Set(allNotes.map(n=>n.trim().replace(/^\d+\.\s*/,'')));
         const notes=Array.from(unique);
         
-        // Extrahiere Runden-Info aus Notes
+        // Extrahiere Runden-Info aus Notes — Reihenfolge wichtig: spezifisch → allgemein
         let roundInfo='';
         for(const note of notes){
           const lower=note.toLowerCase();
-          if((lower.includes('semi')&&lower.includes('final'))||lower.includes('semifinal')){roundInfo='Halbfinale';break;}
-          else if(lower.includes('final')&&!lower.includes('quarter')){roundInfo='Finale';break;}
-          else if(lower.includes('quarter')||lower.includes('viertel')){roundInfo='Viertelfinale';break;}
-          else if(lower.includes('round of 16')||lower.includes('round of 8')||lower.includes('achtel')){roundInfo='Achtelfinale';break;}
+          if(lower.includes('semifinal')||lower.includes('semi-final')||(lower.includes('semi')&&lower.includes('final'))){roundInfo='Halbfinale';break;}
+          else if(lower.includes('quarterfinal')||lower.includes('quarter-final')||(lower.includes('quarter')&&lower.includes('final'))){roundInfo='Viertelfinale';break;}
+          else if(lower.includes('round of 16')||lower.includes('achtelfinale')){roundInfo='Achtelfinale';break;}
+          else if(lower.includes('round of 8')){roundInfo='Achtelfinale';break;}
           else if(lower.includes('playoff')){roundInfo='Playoffs';break;}
+          else if(lower.includes('final')&&!lower.includes('semi')&&!lower.includes('quarter')){roundInfo='Finale';break;}
         }
-        
-        // Übersetze ESPN-Englisch Runden ins Deutsche für Europa-Ligen
+
+        // Champions/Europa Liga: Datum-Fallback (nur wenn Notes keine Runde ergaben)
         if(!roundInfo && (leagueName.includes('UEFA')||leagueName.includes('CHAMPIONS')||leagueName.includes('EUROPA'))){
-          for(const note of notes){
-            const lower=note.toLowerCase();
-            if(lower.includes('playoff')){roundInfo='Playoffs';break;}
-            else if(lower.includes('round of 16')){roundInfo='Achtelfinale';break;}
-            else if(lower.includes('round of 8')||lower.includes('quarterfinal')){roundInfo='Viertelfinale';break;}
-            else if(lower.includes('semifinal')){roundInfo='Halbfinale';break;}
-            else if(lower.includes('final')&&!lower.includes('quarter')){roundInfo='Finale';break;}
-          }
+          const ymd=dateStr; // YYYY-MM-DD
+          if(ymd<'2026-03-01')roundInfo='Playoffs';
+          else if(ymd<'2026-04-01')roundInfo='Achtelfinale';
+          else if(ymd<'2026-04-22')roundInfo='Viertelfinale';
+          else if(ymd<'2026-05-25')roundInfo='Halbfinale';
+          else roundInfo='Finale';
         }
-        
-        // DFB-Pokal: Runde auf Deutsch nach Datum bestimmen
+
+        // DFB-Pokal: Runde nach Datum
         if(!roundInfo && leagueName.includes('dfb')){
           const month=dateStr.slice(5,7);
-          // DFB-Pokal 2025/26: Feb-März = Viertelfinale, April = Halbfinale, Mai+ = Finale
           if(month==='02'||month==='03')roundInfo='Viertelfinale';
           else if(month==='04')roundInfo='Halbfinale';
-          else if(month==='05'||month==='06')roundInfo='Finale';
-        }
-        
-        // Champions/Europa Liga: Runde nach Datum auf Deutsch bestimmen
-        if(!roundInfo && (leagueName.includes('UEFA')||leagueName.includes('CHAMPIONS')||leagueName.includes('EUROPA'))){
-          const month=dateStr.slice(5,7);
-          if(month==='02')roundInfo='Playoffs';
-          else if(month==='03')roundInfo='Achtelfinale';
-          else if(month==='04')roundInfo='Viertelfinale';
-          else if(month==='05'&&dateStr<'2026-05-20')roundInfo='Halbfinale';
           else if(month==='05'||month==='06')roundInfo='Finale';
         }
         
@@ -376,15 +384,33 @@ function parseSoccer(events, leagueName=''){
         let legInfo='';
         for(const note of notes){
           if(note.includes('1st Leg')||note.includes('2nd Leg')||note.includes('Leg')){
-            legInfo=note;break;
+            legInfo=note.replace('1st Leg','Hinspiel').replace('2nd Leg','Rückspiel');break;
           }
         }
-        
+        function deESPN(s){return s
+          .replace(/tied on aggregate/gi,'Gleichstand n. Hin-\/Rückspiel')
+          .replace(/([\w\s.'-]+?)\s+lead[s]?\s+([\d-]+)\s+on penalties/gi,'$1 führt $2 n.E.')
+          .replace(/([\w\s.'-]+?)\s+lead[s]?\s+([\d-]+)\s+on aggregate/gi,'$1 führt $2 n. Gesamtergebnis')
+          .replace(/([\w\s.'-]+?)\s+lead[s]?\s+([\d-]+)\s+on extra time/gi,'$1 führt $2 n.V.')
+          .replace(/([\w\s.'-]+?)\s+advance[s]?\s+([\d-]+)\s+on penalties/gi,'$1 weiter, $2 n.E.')
+          .replace(/([\w\s.'-]+?)\s+advance[s]?\s+([\d-]+)\s+on aggregate/gi,'$1 weiter, $2 n. Gesamtergebnis')
+          .replace(/([\w\s.'-]+?)\s+advance[s]?\s+([\d-]+)\s+on extra time/gi,'$1 weiter, $2 n.V.')
+          .replace(/([\w\s.'-]+?)\s+advance[s]?/gi,'$1 weiter')
+          .replace(/Quarterfinal\s+(\d+)\s+Winner/gi,'Sieger VF$1')
+          .replace(/Semifinal\s+(\d+)\s+Winner/gi,'Sieger HF$1')
+          .replace(/\bon aggregate\b/gi,'n. Gesamtergebnis')
+          .replace(/\bon penalties\b/gi,'n.E.')
+          .replace(/\bextra time\b/gi,'n.V.')
+          .replace(/\bpenalties\b/gi,'n.E.');
+        }
+        if(legInfo)legInfo=deESPN(legInfo);
+        if(roundInfo)roundInfo=deESPN(roundInfo);
+
         // Kombiniere alles
         if(roundInfo&&legInfo)return roundInfo+' · '+legInfo;
         else if(roundInfo)return roundInfo;
         else if(legInfo)return legInfo;
-        else return notes.join(' · ')||'';
+        else return notes.map(deESPN).join(' · ')||'';
       })(),
       date:dateStr||null,time:c?.date?ft(c.date):null};
   });
@@ -393,8 +419,34 @@ function parseSoccer(events, leagueName=''){
 async function fetchSoccerMultiDate(league,dates){
   const base='https://site.web.api.espn.com/apis/site/v2/sports/soccer/'+league+'/scoreboard';
   const allGames=[],seen=new Set();
-  const results=await Promise.all(dates.map(d=>safeFetch(base+'?limit=100&dates='+d).then(j=>parseSoccer(j.events||[],league)).catch(()=>[])));
-  results.forEach(gs=>gs.forEach(g=>{const k=g.home+'|'+g.away+'|'+g.date;if(!seen.has(k)){seen.add(k);allGames.push(g);}}));
+  function addGames(gs){gs.forEach(g=>{const k=g.home+'|'+g.away+'|'+g.date;if(!seen.has(k)){seen.add(k);allGames.push(g);}});}
+  // Dedupliziere auf Wochen-Ebene: ESPN liefert bei einem Datum alle Spiele der Woche
+  const weeks=new Set(dates.map(d=>d.slice(0,6)+'01'));
+  const queryDates=[...new Set([...dates,...weeks])];
+  // Sequentiell mit Pause statt parallel — verhindert 429
+  for(const d of queryDates){
+    try{const j=await safeFetch(base+'?limit=100&dates='+d);addGames(parseSoccer(j.events||[],league));}catch(e){}
+    await new Promise(r=>setTimeout(r,150));
+  }
+  const live=allGames.filter(g=>g.status==='live');
+  const finished=allGames.filter(g=>g.status==='finished').sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const upcoming=allGames.filter(g=>g.status==='upcoming').sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  return[...live,...finished,...upcoming];
+}
+
+async function fetchSoccerRange(league, from, to){
+  const base='https://site.web.api.espn.com/apis/site/v2/sports/soccer/'+league+'/scoreboard';
+  const allGames=[],seen=new Set();
+  function addGames(gs){gs.forEach(g=>{const k=g.home+'|'+g.away+'|'+g.date;if(!seen.has(k)){seen.add(k);allGames.push(g);}});}
+  try{
+    // ESPN akzeptiert Datumsbereiche: dates=20260101-20260630
+    const j=await safeFetch(base+'?limit=200&dates='+from+'-'+to);
+    addGames(parseSoccer(j.events||[],league));
+  }catch(e){}
+  // Falls Datumsbereich nicht klappt, nur aktuelles Scoreboard
+  if(!allGames.length){
+    try{const j=await safeFetch(base+'?limit=100');addGames(parseSoccer(j.events||[],league));}catch(e){}
+  }
   const live=allGames.filter(g=>g.status==='live');
   const finished=allGames.filter(g=>g.status==='finished').sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   const upcoming=allGames.filter(g=>g.status==='upcoming').sort((a,b)=>(a.date||'').localeCompare(b.date||''));
@@ -402,27 +454,11 @@ async function fetchSoccerMultiDate(league,dates){
 }
 
 async function fetchEuropa(){
-  // Lädt CL, EL und DFB parallel in einem einzigen Cache-Eintrag
-  const [clGames,elGames,dfbGames]=await Promise.all([
-    fetchSoccerMultiDate('UEFA.CHAMPIONS',[
-      '20260211','20260212','20260217','20260218','20260219','20260224','20260225',
-      '20260310','20260311','20260317','20260318',
-      '20260407','20260408','20260414','20260415',
-      '20260421','20260422','20260423','20260424','20260425','20260426'
-    ]),
-    fetchSoccerMultiDate('UEFA.EUROPA',[
-      '20260219','20260220','20260226','20260227',
-      '20260312','20260313','20260319','20260320',
-      '20260409','20260410','20260416','20260417',
-      '20260421','20260422','20260423','20260424','20260425','20260426'
-    ]),
-    fetchSoccerMultiDate('ger.dfb_pokal',[
-      '20260203','20260204','20260210','20260211',
-      '20260318','20260319','20260320','20260321','20260322',
-      '20260421','20260422','20260423','20260424','20260425',
-      '20260523','20260524'
-    ]),
-  ]);
+  const clGames=await fetchSoccerRange('UEFA.CHAMPIONS','20260201','20260601');
+  await new Promise(r=>setTimeout(r,500));
+  const elGames=await fetchSoccerRange('UEFA.EUROPA','20260201','20260601');
+  await new Promise(r=>setTimeout(r,500));
+  const dfbGames=await fetchSoccerRange('ger.dfb_pokal','20260201','20260601');
   return{cl:clGames,el:elGames,dfb:dfbGames};
 }
 
@@ -723,7 +759,7 @@ function parseESPNTennisEvent(ev,results,matches){
     const state=comp?.status?.type?.state||'';const completed=comp?.status?.type?.completed||false;const round=comp?.round?.displayName||'';
     // Qualifier und Qualifying rausfiltern
     if(round.toLowerCase().includes('qualifier')||round.toLowerCase().includes('qualifying'))continue;
-    if(state==='pre'){matches.push({player1:p1,player2:p2,status:'upcoming',round,tourn,time:comp.date?ft(comp.date):''});continue;}
+    if(state==='pre'){matches.push({player1:p1,player2:p2,status:'upcoming',round,tourn,time:comp.date?ft(comp.date):'',date:comp.date?comp.date.slice(0,10):''});continue;}
     const ls1=c1?.linescores||[],ls2=c2?.linescores||[];const parts=[];
     for(let i=0;i<Math.max(ls1.length,ls2.length);i++){const g1=ls1[i]?.displayValue??ls1[i]?.value??'';const g2=ls2[i]?.displayValue??ls2[i]?.value??'';if(g1!==''||g2!=='')parts.push((g1||'0')+'-'+(g2||'0'));}
     let scoreStr=parts.join(' ');if(!scoreStr&&c1?.score!=null&&c2?.score!=null)scoreStr=String(c1.score)+'-'+String(c2.score);
@@ -748,22 +784,28 @@ async function fetchTennisLive(league){
     }
   }
   const STATIC_RANKINGS={
-    atp:[{pos:1,player:'Jannik Sinner',country:'ITA',points:'11,790'},{pos:2,player:'Carlos Alcaraz',country:'ESP',points:'8,855'},{pos:3,player:'Alexander Zverev',country:'GER',points:'7,175'},{pos:4,player:'Taylor Fritz',country:'USA',points:'5,095'},{pos:5,player:'Novak Djokovic',country:'SRB',points:'4,810'},{pos:6,player:'Casper Ruud',country:'NOR',points:'4,525'},{pos:7,player:'Daniil Medvedev',country:'RUS',points:'4,020'},{pos:8,player:'Andrey Rublev',country:'RUS',points:'3,795'},{pos:9,player:'Hubert Hurkacz',country:'POL',points:'3,530'},{pos:10,player:'Grigor Dimitrov',country:'BUL',points:'3,420'},{pos:11,player:'Tommy Paul',country:'USA',points:'3,155'},{pos:12,player:'Alex de Minaur',country:'AUS',points:'3,090'},{pos:13,player:'Stefanos Tsitsipas',country:'GRE',points:'2,975'},{pos:14,player:'Felix Auger-Aliassime',country:'CAN',points:'2,840'},{pos:15,player:'Ben Shelton',country:'USA',points:'2,750'},{pos:16,player:'Holger Rune',country:'DEN',points:'2,620'},{pos:17,player:'Karen Khachanov',country:'RUS',points:'2,480'},{pos:18,player:'Sebastian Baez',country:'ARG',points:'2,310'},{pos:19,player:'Ugo Humbert',country:'FRA',points:'2,255'},{pos:20,player:'Francisco Cerundolo',country:'ARG',points:'2,190'}],
-    wta:[{pos:1,player:'Aryna Sabalenka',country:'BLR',points:'10,635'},{pos:2,player:'Iga Swiatek',country:'POL',points:'8,925'},{pos:3,player:'Coco Gauff',country:'USA',points:'6,115'},{pos:4,player:'Elena Rybakina',country:'KAZ',points:'5,643'},{pos:5,player:'Jessica Pegula',country:'USA',points:'5,290'},{pos:6,player:'Emma Navarro',country:'USA',points:'3,978'},{pos:7,player:'Mirra Andreeva',country:'RUS',points:'3,730'},{pos:8,player:'Qinwen Zheng',country:'CHN',points:'3,535'},{pos:9,player:'Barbora Krejcikova',country:'CZE',points:'3,345'},{pos:10,player:'Daria Kasatkina',country:'RUS',points:'3,078'}]
+    atp:[{pos:1,player:'Jannik Sinner',country:'ITA',points:'11,180'},{pos:2,player:'Carlos Alcaraz',country:'ESP',points:'9,015'},{pos:3,player:'Alexander Zverev',country:'GER',points:'6,885'},{pos:4,player:'Taylor Fritz',country:'USA',points:'5,130'},{pos:5,player:'Casper Ruud',country:'NOR',points:'4,325'},{pos:6,player:'Jack Draper',country:'GBR',points:'4,270'},{pos:7,player:'Daniil Medvedev',country:'RUS',points:'3,910'},{pos:8,player:'Tommy Paul',country:'USA',points:'3,765'},{pos:9,player:'Novak Djokovic',country:'SRB',points:'3,730'},{pos:10,player:'Alex de Minaur',country:'AUS',points:'3,490'},{pos:11,player:'Holger Rune',country:'DEN',points:'3,360'},{pos:12,player:'Lorenzo Musetti',country:'ITA',points:'2,850'},{pos:13,player:'Grigor Dimitrov',country:'BUL',points:'2,760'},{pos:14,player:'Ben Shelton',country:'USA',points:'2,720'},{pos:15,player:'Stefanos Tsitsipas',country:'GRE',points:'2,520'},{pos:16,player:'Francisco Cerundolo',country:'ARG',points:'2,295'},{pos:17,player:'Ugo Humbert',country:'FRA',points:'2,280'},{pos:18,player:'Sebastian Baez',country:'ARG',points:'2,140'},{pos:19,player:'Nuno Borges',country:'POR',points:'2,045'},{pos:20,player:'Flavio Cobolli',country:'ITA',points:'2,025'}],
+    wta:[{pos:1,player:'Aryna Sabalenka',country:'BLR',points:'9,816'},{pos:2,player:'Iga Swiatek',country:'POL',points:'7,641'},{pos:3,player:'Coco Gauff',country:'USA',points:'6,521'},{pos:4,player:'Elena Rybakina',country:'KAZ',points:'5,268'},{pos:5,player:'Jessica Pegula',country:'USA',points:'4,613'},{pos:6,player:'Madison Keys',country:'USA',points:'4,265'},{pos:7,player:'Mirra Andreeva',country:'RUS',points:'4,025'},{pos:8,player:'Qinwen Zheng',country:'CHN',points:'3,963'},{pos:9,player:'Karolina Muchova',country:'CZE',points:'3,560'},{pos:10,player:'Daria Kasatkina',country:'RUS',points:'3,393'},{pos:11,player:'Emma Navarro',country:'USA',points:'3,335'},{pos:12,player:'Paula Badosa',country:'ESP',points:'3,266'},{pos:13,player:'Jasmine Paolini',country:'ITA',points:'3,206'},{pos:14,player:'Diana Shnaider',country:'RUS',points:'3,178'},{pos:15,player:'Donna Vekic',country:'CRO',points:'2,811'},{pos:16,player:'Elina Svitolina',country:'UKR',points:'2,575'},{pos:17,player:'Barbora Krejcikova',country:'CZE',points:'2,540'},{pos:18,player:'Victoria Azarenka',country:'BLR',points:'2,375'},{pos:19,player:'Danielle Collins',country:'USA',points:'2,318'},{pos:20,player:'Anna Kalinskaya',country:'RUS',points:'2,195'}]
   };
   try{
     const rdata=await fetchTennisJSON('https://site.web.api.espn.com/apis/site/v2/sports/tennis/'+league+'/rankings');
     const ranks=rdata?.rankings?.[0]?.ranks||rdata?.ranks||[];
-    if(ranks.length)rankings=ranks.slice(0,20).map(r=>{const a=r?.athlete||{};return{pos:Number(r?.current||r?.rank||0),player:a?.displayName||a?.fullName||'?',country:a?.citizenshipCountry||a?.citizenship||a?.flagAltText||a?.flag?.alt||'',points:String(r?.points||r?.value||'')};}).filter(r=>r.pos>0).sort((a,b)=>a.pos-b.pos);
+    if(ranks.length>=10)rankings=ranks.slice(0,20).map(r=>{const a=r?.athlete||{};return{pos:Number(r?.current||r?.rank||0),player:a?.displayName||a?.fullName||'?',country:a?.citizenshipCountry||a?.citizenship||a?.flagAltText||a?.flag?.alt||'',points:String(r?.points||r?.value||'')};}).filter(r=>r.pos>0).sort((a,b)=>a.pos-b.pos);
   }catch(e){}
   if(!rankings.length)rankings=STATIC_RANKINGS[league]||[];
   {
     const today=new Date().toISOString().slice(0,10);
+    // Aktives Turnier aus ESPN-Daten erkennen
+    const activeTourns=new Set([...results,...matches].map(m=>m.tourn).filter(Boolean).map(t=>t.toLowerCase()));
     const STATIC_CAL={
-      atp:[{name:'BNP Paribas Open',city:'Indian Wells',cat:'Masters 1000',date:'2026-03-04',end:'2026-03-15'},{name:'Miami Open',city:'Miami',cat:'Masters 1000',date:'2026-03-18',end:'2026-03-30'},{name:'Monte-Carlo Masters',city:'Monte-Carlo',cat:'Masters 1000',date:'2026-04-05',end:'2026-04-12'},{name:'Barcelona Open',city:'Barcelona',cat:'ATP 500',date:'2026-04-13',end:'2026-04-19'},{name:'Madrid Open',city:'Madrid',cat:'Masters 1000',date:'2026-04-22',end:'2026-05-03'},{name:"Internazionali BNL d'Italia",city:'Rome',cat:'Masters 1000',date:'2026-05-06',end:'2026-05-17'},{name:'Roland Garros',city:'Paris',cat:'Grand Slam',date:'2026-05-24',end:'2026-06-07'},{name:'Halle Open',city:'Halle',cat:'ATP 500',date:'2026-06-08',end:'2026-06-14'},{name:'Wimbledon',city:'London',cat:'Grand Slam',date:'2026-06-29',end:'2026-07-12'},{name:'US Open',city:'New York',cat:'Grand Slam',date:'2026-08-31',end:'2026-09-13'}],
-      wta:[{name:'BNP Paribas Open',city:'Indian Wells',cat:'WTA 1000',date:'2026-03-04',end:'2026-03-15'},{name:'Miami Open',city:'Miami',cat:'WTA 1000',date:'2026-03-18',end:'2026-03-30'},{name:'Porsche Tennis Grand Prix',city:'Stuttgart',cat:'WTA 500',date:'2026-04-20',end:'2026-04-26'},{name:'Madrid Open',city:'Madrid',cat:'WTA 1000',date:'2026-04-22',end:'2026-05-03'},{name:"Internazionali BNL d'Italia",city:'Rome',cat:'WTA 1000',date:'2026-05-06',end:'2026-05-17'},{name:'Roland Garros',city:'Paris',cat:'Grand Slam',date:'2026-05-24',end:'2026-06-07'},{name:'Wimbledon',city:'London',cat:'Grand Slam',date:'2026-06-29',end:'2026-07-12'},{name:'US Open',city:'New York',cat:'Grand Slam',date:'2026-08-31',end:'2026-09-13'}]
+      atp:[{name:'Monte-Carlo Masters',city:'Monte-Carlo',cat:'Masters 1000',date:'2026-04-05',end:'2026-04-12'},{name:'Barcelona Open',city:'Barcelona',cat:'ATP 500',date:'2026-04-13',end:'2026-04-19'},{name:'Madrid Open',city:'Madrid',cat:'Masters 1000',date:'2026-04-22',end:'2026-05-03'},{name:"Internazionali BNL d'Italia",city:'Rome',cat:'Masters 1000',date:'2026-05-06',end:'2026-05-17'},{name:'Roland Garros',city:'Paris',cat:'Grand Slam',date:'2026-05-24',end:'2026-06-07'},{name:'Halle Open',city:'Halle',cat:'ATP 500',date:'2026-06-08',end:'2026-06-14'},{name:'Wimbledon',city:'London',cat:'Grand Slam',date:'2026-06-29',end:'2026-07-12'},{name:'US Open',city:'New York',cat:'Grand Slam',date:'2026-08-31',end:'2026-09-13'}],
+      wta:[{name:'Porsche Tennis Grand Prix',city:'Stuttgart',cat:'WTA 500',date:'2026-04-20',end:'2026-04-26'},{name:'Madrid Open',city:'Madrid',cat:'WTA 1000',date:'2026-04-22',end:'2026-05-03'},{name:"Internazionali BNL d'Italia",city:'Rome',cat:'WTA 1000',date:'2026-05-06',end:'2026-05-17'},{name:'Roland Garros',city:'Paris',cat:'Grand Slam',date:'2026-05-24',end:'2026-06-07'},{name:'Wimbledon',city:'London',cat:'Grand Slam',date:'2026-06-29',end:'2026-07-12'},{name:'US Open',city:'New York',cat:'Grand Slam',date:'2026-08-31',end:'2026-09-13'}]
     };
-    kalender=(STATIC_CAL[league]||[]).map(e=>Object.assign({},e,{surf:'',live:e.date<=today&&e.end>=today}));
+    kalender=(STATIC_CAL[league]||[]).map(e=>{
+      const byDate=e.date<=today&&e.end>=today;
+      const byName=activeTourns.size>0&&[...activeTourns].some(t=>t.includes(e.name.toLowerCase())||e.name.toLowerCase().includes(t));
+      return Object.assign({},e,{surf:'',live:byDate||byName});
+    });
   }
   const BIG_CATS=['Masters 1000','ATP 500','WTA 1000','WTA 500','Grand Slam'];
   const bigNames=new Set((kalender).filter(t=>BIG_CATS.some(c=>t.cat===c)).map(t=>t.name.toLowerCase()));
@@ -860,7 +902,17 @@ const LOADERS={
   tennis_0:fetchTennisATP, tennis_1:fetchTennisWTA,
   golf_0:()=>fetchGolfLB(), golf_1:()=>fetchGolfPlan(), golf_2:()=>fetchGolfTeeTimes()
 };
-async function load(sport,tab){const k=sport+'_'+tab;if(busy[k])return;busy[k]=true;render();try{cache[k]=await LOADERS[k]();ts[k]=new Date();}catch(e){cache[k]={_err:e.message||'Ladefehler'};}busy[k]=false;render();}
+// bundesliga_4 und bundesliga_5 teilen denselben Cache-Eintrag 'europa'
+const CACHE_ALIAS={'bundesliga_4':'europa','bundesliga_5':'europa'};
+async function load(sport,tab){
+  const k=sport+'_'+tab;
+  const ck=CACHE_ALIAS[k]||k;  // effektiver Cache-Key
+  if(busy[ck])return;
+  busy[ck]=true;render();
+  try{cache[ck]=await LOADERS[k]();ts[ck]=new Date();}
+  catch(e){cache[ck]={_err:e.message||'Ladefehler'};}
+  busy[ck]=false;render();
+}
 
 // ─── RENDERERS ────────────────────────────────────────────
 function renderGame(g){
@@ -988,6 +1040,12 @@ function matchCard(m){
     } else {
       scoreHtml='<div class="tennis-score-block"><div style="font-size:11px;color:#ff4444">läuft</div></div>';
     }
+  } else {
+    // Upcoming: Datum + Uhrzeit anzeigen
+    const dateStr=m.date?fd(m.date):'';
+    const timeStr=m.time||'';
+    const display=[dateStr,timeStr].filter(Boolean).join(' · ');
+    scoreHtml='<div class="tennis-score-block"><div style="font-size:11px;color:#4a9eff;font-weight:600">'+esc(display||'–')+'</div></div>';
   }
   return '<div class="card'+(live?' live-red':'')+'">'+
     (live?'<span class="badge red">● LIVE</span>':'')+
@@ -1054,7 +1112,14 @@ function rStreams(content){content.innerHTML='<div class="card" style="padding:1
 
 function switchSport(id){state.cur=id;buildNav();render();const tab=state.tabs[id];if(id!=='streams'&&!cache[id+'_'+tab]&&!busy[id+'_'+tab])load(id,tab);}
 function switchTab(i){state.tabs[state.cur]=i;render();const k=state.cur+'_'+i;if(!cache[k]&&!busy[k])load(state.cur,i);}
-function refresh(){const k=state.cur+'_'+state.tabs[state.cur];delete cache[k];load(state.cur,state.tabs[state.cur]);}
+function refresh(){
+  const k=state.cur+'_'+state.tabs[state.cur];
+  const ck=CACHE_ALIAS[k]||k;
+  delete cache[ck];
+  // BL-interne Caches auch leeren
+  if(state.cur==='bundesliga'){_blCache=null;_getBLCache=null;}
+  load(state.cur,state.tabs[state.cur]);
+}
 
 let _startY=0;
 let _pulling=false;
@@ -1127,7 +1192,7 @@ buildNav();render();
     if(k===activeKey)continue;
     const[s,t]=k.split('_');
     await load(s,Number(t));
-    await new Promise(r=>setTimeout(r,300));
+    await new Promise(r=>setTimeout(r,800));
   }
 })();
 </script>
