@@ -135,7 +135,7 @@ const SPORTS=[
   {id:'bundesliga',label:'Fußball',icon:'⚽',tabs:['-1','Spieltag','+1','Tabelle','DFB','Europa']},
   {id:'f1',label:'Formel 1',icon:'🏎️',tabs:['Kalender','Ergebnisse','Fahrer','Teams']},
   {id:'tennis',label:'Tennis',icon:'🎾',tabs:['ATP','WTA']},
-  {id:'golf',label:'Golf',icon:'⛳',tabs:['Leaderboard','Turniere','Tee-Times']},
+  {id:'golf',label:'Golf',icon:'⛳',tabs:['Leaderboard','Tee-Times','Kalender']},
   {id:'streams',label:'Streams',icon:'📺',tabs:[]},
 ];
 
@@ -204,7 +204,7 @@ function render(){
     bundesliga_5:d=>rEuropa(d,euroSub.tab),
     f1_0:rF1Kalender, f1_1:rF1Ergebnisse, f1_2:rF1Fahrer, f1_3:rF1Teams,
     tennis_0:d=>rTennis(d,tennisSub.tab), tennis_1:d=>rTennis(d,tennisSub.tab),
-    golf_0:rGolfLB, golf_1:rGolfPlan, golf_2:rGolfTeeTimes
+  golf_0:rGolfLB, golf_1:rGolfTeeTimes, golf_2:rGolfPlan
   };
   content.innerHTML=(R[k]||function(){return '<div class="empty">Keine Daten</div>';})(d);
 
@@ -895,8 +895,57 @@ async function fetchGolfLB(){
 }
 async function fetchGolfPlan(){
   const today=new Date().toISOString().slice(0,10);
-  const ev=[{name:'Arnold Palmer Invitational',course:'Bay Hill Club & Lodge, Orlando FL',date:'2026-03-05',end:'2026-03-08',major:false},{name:'The Players Championship',course:'TPC Sawgrass, Ponte Vedra Beach FL',date:'2026-03-12',end:'2026-03-15',major:false},{name:'Valspar Championship',course:'Innisbrook Resort, FL',date:'2026-03-19',end:'2026-03-22',major:false},{name:"Texas Children's Houston Open",course:'Memorial Park Golf Course, Houston TX',date:'2026-03-26',end:'2026-03-29',major:false},{name:'Valero Texas Open',course:'TPC San Antonio, TX',date:'2026-04-02',end:'2026-04-05',major:false},{name:'⭐ Masters Tournament',course:'Augusta National, Augusta GA',date:'2026-04-09',end:'2026-04-12',major:true},{name:'RBC Heritage',course:'Harbour Town Golf Links, Hilton Head Island SC',date:'2026-04-16',end:'2026-04-19',major:false},{name:'⭐ PGA Championship',course:'Aronimink Golf Club, Pennsylvania',date:'2026-05-14',end:'2026-05-17',major:true},{name:'⭐ U.S. Open',course:'Oakmont Country Club, Pennsylvania',date:'2026-06-18',end:'2026-06-21',major:true},{name:'⭐ The Open Championship',course:'Royal Birkdale, Southport, England',date:'2026-07-16',end:'2026-07-19',major:true}];
-  return{events:ev.map(e=>Object.assign({},e,{live:e.date<=today&&e.end>=today}))};
+  const MAJORS=['masters tournament','pga championship','u.s. open','us open','the open championship','open championship','the open'];
+  function isMajor(name){const n=(name||'').toLowerCase();return MAJORS.some(m=>n.includes(m));}
+  function toISO(s){if(!s)return '';if(/^\d{8}$/.test(s))return s.slice(0,4)+'-'+s.slice(4,6)+'-'+s.slice(6,8);return String(s).slice(0,10);}
+  const STATIC=[
+    {name:'RBC Heritage',course:'Harbour Town Golf Links, Hilton Head Island SC',date:'2026-04-16',end:'2026-04-19',major:false},
+    {name:'Zurich Classic of New Orleans',course:'TPC Louisiana, Avondale LA',date:'2026-04-23',end:'2026-04-26',major:false},
+    {name:'Cadillac Championship',course:'',date:'2026-04-30',end:'2026-05-03',major:false},
+    {name:'Truist Championship',course:'',date:'2026-05-07',end:'2026-05-10',major:false},
+    {name:'ONEflight Myrtle Beach Classic',course:'',date:'2026-05-07',end:'2026-05-10',major:false},
+    {name:'⭐ PGA Championship',course:'Aronimink Golf Club, Pennsylvania',date:'2026-05-14',end:'2026-05-17',major:true},
+    {name:'⭐ U.S. Open',course:'Oakmont Country Club, Pennsylvania',date:'2026-06-18',end:'2026-06-21',major:true},
+    {name:'⭐ The Open Championship',course:'Royal Birkdale, Southport, England',date:'2026-07-16',end:'2026-07-19',major:true},
+  ];
+  let espnEvents=[];
+  let _dbg='';
+  try{
+    const wl=await fetchJSON('https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/calendar/whitelist?lang=en&region=us&limit=100');
+    const entries=wl.sections||[];
+    _dbg='espn:'+entries.length;
+    const raw=[];
+    for(const e of entries){
+      const name=e.label||e.name||'';
+      const start=toISO(e.startDate||e.date||'');
+      const end=toISO(e.endDate||e.startDate||start);
+      if(!name||!start||end<today)continue;
+      raw.push({name:(isMajor(name)?'⭐ ':'')+name,course:'',date:start,end:end,major:isMajor(name),_ref:(e.event?.$ref||'').replace(/^http:\/\//,'https://')});
+    }
+    const withVenue=await Promise.all(raw.map(async e=>{
+      if(!e._ref)return e;
+      try{
+        const ev=await fetchJSON(e._ref);
+        const venueRef=(ev.venues?.[0]||{}).$ref;
+        if(venueRef){
+          const v=await fetchJSON(venueRef.replace(/^http:\/\//,'https://'));
+          const vname=v.fullName||v.name||'';
+          const city=v.address?.city||'';
+          const state=v.address?.state||'';
+          const country=v.address?.country||'';
+          const loc=[city,state||country].filter(Boolean).join(', ');
+          e.course=[vname,loc].filter(Boolean).join(', ');
+        }
+      }catch(_){}
+      delete e._ref;
+      return e;
+    }));
+    espnEvents.push(...withVenue);
+  }catch(e){_dbg='err:'+e.message;}
+  const base=espnEvents.length>STATIC.length?espnEvents:STATIC.filter(e=>e.end>=today);
+  const src=espnEvents.length>STATIC.length?'espn':'static';
+  const ev=base.slice().sort((a,b)=>a.date.localeCompare(b.date));
+  return{events:ev.map(e=>Object.assign({},e,{live:e.date<=today&&e.end>=today})),_source:src};
 }
 async function fetchGolfTeeTimes(){
   const{event,comp}=await fetchGolfLive();
@@ -919,7 +968,7 @@ const LOADERS={
   bundesliga_5:fetchEuropa,  // CL + EL + DFB in einem Request
   f1_0:fetchF1Kalender, f1_1:fetchF1Ergebnisse, f1_2:fetchF1Fahrer, f1_3:fetchF1Teams,
   tennis_0:fetchTennisATP, tennis_1:fetchTennisWTA,
-  golf_0:()=>fetchGolfLB(), golf_1:()=>fetchGolfPlan(), golf_2:()=>fetchGolfTeeTimes()
+  golf_0:()=>fetchGolfLB(), golf_1:()=>fetchGolfTeeTimes(), golf_2:()=>fetchGolfPlan()
 };
 // bundesliga_4 und bundesliga_5 teilen denselben Cache-Eintrag 'europa'
 const CACHE_ALIAS={'bundesliga_4':'europa','bundesliga_5':'europa'};
@@ -1107,13 +1156,18 @@ function rGolfLB(d){
   return h+'</div>';
 }
 function rGolfPlan(d){
-  const events=d.events||[];if(!events.length)return '<div class="empty">Keine Turniere</div>';
-  const today=new Date().toISOString().slice(0,10);const nextIdx=events.findIndex(e=>e.end>=today&&!e.live);
-  return events.map((e,i)=>{const date=e.date&&e.end?fd(e.date)+' – '+fd(e.end):'';const isPast=e.end<today&&!e.live;const isNext=i===nextIdx;
+  const events=(d.events||[]);
+  if(!events.length)return '<div class="empty">Keine Turniere</div>';
+  const today=new Date().toISOString().slice(0,10);
+  const nextIdx=events.findIndex(e=>e.end>=today&&!e.live);
+  const src=d._source==='espn'
+    ?'<div style="text-align:center;font-size:9px;color:#444;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">📡 Live-Kalender via ESPN</div>'
+    :'<div style="text-align:center;font-size:9px;color:#555;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">📋 Kalender (Stand: Apr 2026)</div>';
+  return src+events.map((e,i)=>{const date=e.date&&e.end?fd(e.date)+' – '+fd(e.end):'';const isNext=i===nextIdx;
     return '<div class="card'+(e.live?' live-red':isNext?' live-blue':'')+'">'+
       (e.live?'<span class="badge red">● LIVE</span>':isNext?'<span class="badge blue">Nächstes Turnier</span>':'')+
       (e.major?'<span class="major-badge">MAJOR</span>':'')+
-      '<div style="font-size:13px;font-weight:700;margin-top:'+(e.major||e.live||isNext?4:0)+'px;'+(isPast?'opacity:0.4':'')+'">'+esc(e.name)+'</div>'+
+      '<div style="font-size:13px;font-weight:700;margin-top:'+(e.major||e.live||isNext?4:0)+'px">'+esc(e.name)+'</div>'+
       '<div style="font-size:11px;color:#555;margin-top:2px">'+esc(e.course)+'</div>'+
       '<div style="font-size:11px;color:#4a9eff;margin-top:2px;font-weight:600">'+date+'</div></div>';
   }).join('');
