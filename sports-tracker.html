@@ -228,10 +228,11 @@ function parseGames(gs){
   return(gs||[]).map(g=>{
     const resFinal=(g.matchResults||[]).find(r=>r.resultTypeID===2);
     const resHZ=(g.matchResults||[]).find(r=>r.resultTypeID===1);
-    // OpenLigaDB liefert Zeiten ohne Timezone-Suffix → als UTC behandeln
+    // OpenLigaDB liefert Lokalzeit (Europe/Berlin) ohne Timezone-Suffix
+    // Browser parst ohne Suffix als Lokalzeit — direkt verwenden, keine manuelle Konvertierung
     const dtRaw=g.matchDateTime||null;
-    const dtStr=dtRaw?(dtRaw.includes('Z')||dtRaw.includes('+'))?dtRaw:dtRaw+'Z':null;
-    const kickoff=dtStr?new Date(dtStr).getTime():0;
+    const dtStr=dtRaw||null;
+    const kickoff=dtRaw?new Date(dtRaw).getTime():0;
     const minsElapsed=kickoff?(now-kickoff)/60000:-1;
     const timeLive=!g.matchIsFinished&&kickoff>0&&minsElapsed>=0&&minsElapsed<115;
     const isLive=!g.matchIsFinished&&timeLive;
@@ -246,8 +247,8 @@ function parseGames(gs){
       hs:g.matchIsFinished?(resFinal?resFinal.pointsTeam1:null):isLive?(res?res.pointsTeam1:0):null,
       as:g.matchIsFinished?(resFinal?resFinal.pointsTeam2:null):isLive?(res?res.pointsTeam2:0):null,
       status:g.matchIsFinished?'finished':isLive?'live':'upcoming',
-      clock,
-      date:dtStr?new Date(dtStr).toISOString().slice(0,10):null,
+      clock,_kickoff:kickoff,
+      date:dtStr?dtStr.slice(0,10):null,
       time:dtStr?ft(dtStr):null};
   });
 }
@@ -304,7 +305,14 @@ async function fetchBLAll(){
         if(g.date!==todayStr)return g; // Nur heutige Spiele mit ESPN mergen
         let bestKey=null,bestScore=0;
         Object.keys(evMap).forEach(k=>{const[h,a]=k.split('|');let s=0;if(tok(h,g.home))s+=2;if(tok(a,g.away))s+=2;if(s>bestScore){bestScore=s;bestKey=k;}});
-        if(bestKey&&bestScore>=2){const e=evMap[bestKey];if(e.status==='live'||e.status==='finished')return Object.assign({},g,{hs:e.hs!==null?e.hs:g.hs,as:e.as!==null?e.as:g.as,status:e.status,clock:e.clock});}
+        if(bestKey&&bestScore>=2){
+          const e=evMap[bestKey];
+          // Kickoff aus Spielzeit berechnen um ESPN-Fehler zu vermeiden
+          const gameKickoff=g._kickoff||0;
+          const kickoffPassed=gameKickoff>0&&(Date.now()-gameKickoff)>=0;
+          if((e.status==='live'&&kickoffPassed)||e.status==='finished')
+            return Object.assign({},g,{hs:e.hs!==null?e.hs:g.hs,as:e.as!==null?e.as:g.as,status:e.status,clock:e.clock});
+        }
         return g;
       });
     }catch(e){}
