@@ -839,33 +839,37 @@ async function fetchTennisATP(){return fetchTennisLive('atp');}
 async function fetchTennisWTA(){return fetchTennisLive('wta');}
 
 // ─── GOLF ─────────────────────────────────────────────────
+let _golfLiveCache=null,_golfLiveCacheTs=0;
 async function fetchGolfLive(){
+  if(_golfLiveCache&&Date.now()-_golfLiveCacheTs<120000)return _golfLiveCache;
   const data=await fetchJSON('https://site.web.api.espn.com/apis/site/v2/sports/golf/leaderboard?league=pga');
   const event=(data?.events||[]).find(e=>e?.primary)||(data?.events||[])[0];
   if(!event)throw new Error('Keine PGA-Eventdaten');
   const comp=(event.competitions||[])[0];if(!comp)throw new Error('Keine Competition-Daten');
-  return{event,comp};
+  _golfLiveCache={event,comp};_golfLiveCacheTs=Date.now();
+  return _golfLiveCache;
 }
 function golfCountry3(c){const ab=c?.athlete?.birthPlace?.countryAbbreviation;if(ab)return String(ab).toUpperCase();const alt=c?.athlete?.flag?.alt||'';const map={'United States':'USA','England':'ENG','Scotland':'SCO','Wales':'WAL','Northern Ireland':'NIR','Ireland':'IRL','Germany':'GER','France':'FRA','Spain':'ESP','Italy':'ITA','Sweden':'SWE','Norway':'NOR','Denmark':'DEN','Finland':'FIN','Austria':'AUT','Switzerland':'SUI','Netherlands':'NED','Belgium':'BEL','Canada':'CAN','Mexico':'MEX','Brazil':'BRA','Argentina':'ARG','Colombia':'COL','Chile':'CHI','Japan':'JPN','South Korea':'KOR','China':'CHN','Australia':'AUS','New Zealand':'NZL','South Africa':'RSA'};return map[alt]||(alt?alt.slice(0,3).toUpperCase():'');}
 function golfTodayDetail(c){const st=c?.status||{};function norm(v){if(v==null)return null;const s=String(v).trim().replace(/[−–—]/g,'-').toUpperCase();if(!s||s==='-'||s==='--')return null;if(s==='EVEN'||s==='0'||s==='+0'||s==='-0')return 'E';if(s==='E')return 'E';if(/^[+\-]\d+$/.test(s))return s;if(/^\d+$/.test(s)){const n=parseInt(s,10);return(n>=1&&n<=18)?null:s;}return null;}let v=norm(st.today?.displayValue??st.today?.value);if(v)return v;v=norm(c?.today?.displayValue??c?.today?.value);if(v)return v;const td=st.todayDetail||st.today?.detail||st.detail||'';const m=String(td).replace(/[−–—]/g,'-').match(/^([+\-]\d+|E|EVEN)/i);if(m)return m[1].toUpperCase()==='EVEN'?'E':m[1].toUpperCase();const ls=c?.linescores||[];if(ls.length){v=norm(ls[ls.length-1]?.displayValue??ls[ls.length-1]?.value);if(v)return v;}return '-';}
 async function fetchGolfLB(){
   const{event,comp}=await fetchGolfLive();
-  const scores=(comp.competitors||[]).filter(c=>c?.athlete?.displayName).map(c=>{
+  function deRound(s){return(s||'').replace(/Round\s+(\d+)/i,'Runde $1').replace(/Final\s+Round/i,'Finalrunde').replace(/January|February|March|April|May|June|July|August|September|October|November|December/gi,m=>({January:'Januar',February:'Februar',March:'März',April:'April',May:'Mai',June:'Juni',July:'Juli',August:'August',September:'September',October:'Oktober',November:'November',December:'Dezember'})[m]||m);}
+  // Unterstütze Einzel- und Team-Events
+  const rawComps=(comp.competitors||[]);
+  const scores=rawComps.filter(c=>c?.athlete?.displayName||c?.team?.displayName).map(c=>{
+    const isTeam=!c?.athlete?.displayName&&!!c?.team?.displayName;
+    const displayName=isTeam?c.team.displayName:c.athlete.displayName;
     const st=c?.status||{};
-    // Runden-Scores aus Linescores
     const linescores=(c?.linescores||[]).map(l=>{
       const v=l?.displayValue??l?.value;
       if(v==null)return '-';
       const s=String(v).trim().replace(/[−–—]/g,'-');
       return s==='E'?'E':s;
     });
-    // today = heutiger Rundenscore (aus golfTodayDetail)
     const today=golfTodayDetail(c);
-    // Total = Summe aller Runden-Linescores (jeder Linescore = Par-Ergebnis einer Runde)
     function calcTotal(c){
       const ls=c?.linescores||[];
       if(!ls.length){
-        // Fallback: statistics nach "toPar" oder "totalToPar" suchen
         const stats=c?.statistics||[];
         const tp=stats.find(s=>['toPar','totalToPar','TOT','TO PAR'].includes(s.name||s.abbreviation||''));
         if(tp?.displayValue){const v=String(tp.displayValue).trim().replace(/[−–—]/g,'-');return v==='E'?0:Number(v.replace(/^\+/,''))||0;}
@@ -876,7 +880,7 @@ async function fetchGolfLB(){
         const v=l?.displayValue??l?.value;
         if(v==null)continue;
         const s=String(v).trim().replace(/[−–—]/g,'-');
-        if(s==='E'||s==='0')continue; // par
+        if(s==='E'||s==='0')continue;
         const n=Number(s.replace(/^\+/,''));
         if(!isNaN(n))sum+=n;
       }
@@ -884,20 +888,51 @@ async function fetchGolfLB(){
     }
     const totalNum=calcTotal(c);
     const totalStr=totalNum==null?'-':totalNum===0?'E':totalNum>0?'+'+totalNum:String(totalNum);
-    return{pos:st?.position?.displayName||'-',player:c.athlete.displayName,country:golfCountry3(c),
+    const country=isTeam?'':golfCountry3(c);
+    return{pos:st?.position?.displayName||'-',player:displayName,country,
       r1:linescores[0]||'-',r2:linescores[1]||'-',r3:linescores[2]||'-',
       score:totalStr,today,
       thru:st?.displayThru||(st?.type?.state==='post'?'F':(st?.thru!=null?String(st.thru):'-')),
       _totalNum:totalNum??999};
   });
   scores.sort((a,b)=>{const na=parseInt((String(a.pos).match(/\d+/)||['9999'])[0],10);const nb=parseInt((String(b.pos).match(/\d+/)||['9999'])[0],10);return na-nb;});
-  return{tournament:event.name||'PGA TOUR',course:'',round:comp?.status?.type?.detail||'',scores};
+  const today2=new Date().toISOString().slice(0,10);
+  const evEnd=(event.endDate||'').slice(0,10);
+  let teetimes=[];
+  if(evEnd>=today2){
+    const list=(comp.competitors||[]).filter(c=>c?.athlete?.displayName||c?.team?.displayName).map(c=>{
+      const isTeam=!c?.athlete?.displayName&&!!c?.team?.displayName;
+      const name=isTeam?c.team.displayName:c.athlete.displayName;
+      const st=c.status||{};const iso=st.teeTime||null;const ms=iso?Date.parse(iso):NaN;
+      const teeUS=isFinite(ms)?new Intl.DateTimeFormat('en-US',{weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/New_York'}).format(new Date(ms)):(st.detail||'-');
+      const teeDE=isFinite(ms)?new Intl.DateTimeFormat('de-DE',{weekday:'short',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Berlin'}).format(new Date(ms)):'';
+      const startHole=Number(st.startHole||1);
+      return{ms:isFinite(ms)?ms:9e15,tee:teeUS,teeDE,player:name,state:st?.type?.state||'',startHole};
+    }).filter(x=>x.state!=='post'||!isFinite(x.ms)).sort((a,b)=>a.ms-b.ms);
+    const hasShotgun=list.some(x=>x.startHole===10);
+    const groups=new Map();
+    for(const x of list){if(x.tee==='-')continue;const key=x.tee+'|'+x.teeDE+'|'+x.startHole;if(!groups.has(key))groups.set(key,{teeUS:x.tee,teeDE:x.teeDE,startHole:x.startHole,players:[]});groups.get(key).players.push(x.player);}
+    teetimes=[...groups.values()].sort((a,b)=>a.ms-b.ms||a.startHole-b.startHole).map(v=>({teeTime:v.teeUS,teeDE:v.teeDE,startHole:hasShotgun?v.startHole:null,players:v.players}));
+  }
+  return{tournament:event.name||'PGA TOUR',course:'',round:deRound(comp?.status?.type?.detail||comp?.status?.displayClock||''),scores,teetimes,teeNote:'Quelle: ESPN. Offizielle Tee-Times: pgatour.com'};
 }
 async function fetchGolfPlan(){
   const today=new Date().toISOString().slice(0,10);
   const MAJORS=['masters tournament','pga championship','u.s. open','us open','the open championship','open championship','the open'];
   function isMajor(name){const n=(name||'').toLowerCase();return MAJORS.some(m=>n.includes(m));}
   function toISO(s){if(!s)return '';if(/^\d{8}$/.test(s))return s.slice(0,4)+'-'+s.slice(4,6)+'-'+s.slice(6,8);return String(s).slice(0,10);}
+  // Statische Kursinfos für bekannte Turniere
+  const COURSES={
+    'masters tournament':'Augusta National, Augusta GA',
+    'pga championship':'Aronimink Golf Club, Pennsylvania',
+    'u.s. open':'Oakmont Country Club, Pennsylvania',
+    'us open':'Oakmont Country Club, Pennsylvania',
+    'the open championship':'Royal Birkdale, Southport, England',
+    'rbc heritage':'Harbour Town Golf Links, Hilton Head Island SC',
+    'zurich classic':'TPC Louisiana, Avondale LA',
+    'the players championship':'TPC Sawgrass, Ponte Vedra Beach FL',
+  };
+  function getCourse(name){const n=(name||'').toLowerCase();for(const[k,v]of Object.entries(COURSES)){if(n.includes(k))return v;}return '';}
   const STATIC=[
     {name:'RBC Heritage',course:'Harbour Town Golf Links, Hilton Head Island SC',date:'2026-04-16',end:'2026-04-19',major:false},
     {name:'Zurich Classic of New Orleans',course:'TPC Louisiana, Avondale LA',date:'2026-04-23',end:'2026-04-26',major:false},
@@ -909,40 +944,19 @@ async function fetchGolfPlan(){
     {name:'⭐ The Open Championship',course:'Royal Birkdale, Southport, England',date:'2026-07-16',end:'2026-07-19',major:true},
   ];
   let espnEvents=[];
-  let _dbg='';
   try{
     const wl=await fetchJSON('https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/calendar/whitelist?lang=en&region=us&limit=100');
     const entries=wl.sections||[];
-    _dbg='espn:'+entries.length;
-    const raw=[];
     for(const e of entries){
       const name=e.label||e.name||'';
       const start=toISO(e.startDate||e.date||'');
       const end=toISO(e.endDate||e.startDate||start);
       if(!name||!start||end<today)continue;
-      raw.push({name:(isMajor(name)?'⭐ ':'')+name,course:'',date:start,end:end,major:isMajor(name),_ref:(e.event?.$ref||'').replace(/^http:\/\//,'https://')});
+      const displayName=(isMajor(name)?'⭐ ':'')+name;
+      espnEvents.push({name:displayName,course:getCourse(name),date:start,end:end,major:isMajor(name)});
     }
-    const withVenue=await Promise.all(raw.map(async e=>{
-      if(!e._ref)return e;
-      try{
-        const ev=await fetchJSON(e._ref);
-        const venueRef=(ev.venues?.[0]||{}).$ref;
-        if(venueRef){
-          const v=await fetchJSON(venueRef.replace(/^http:\/\//,'https://'));
-          const vname=v.fullName||v.name||'';
-          const city=v.address?.city||'';
-          const state=v.address?.state||'';
-          const country=v.address?.country||'';
-          const loc=[city,state||country].filter(Boolean).join(', ');
-          e.course=[vname,loc].filter(Boolean).join(', ');
-        }
-      }catch(_){}
-      delete e._ref;
-      return e;
-    }));
-    espnEvents.push(...withVenue);
-  }catch(e){_dbg='err:'+e.message;}
-  const base=espnEvents.length>STATIC.length?espnEvents:STATIC.filter(e=>e.end>=today);
+  }catch(e){}
+  const base=espnEvents.length>STATIC.length?espnEvents:STATIC;
   const src=espnEvents.length>STATIC.length?'espn':'static';
   const ev=base.slice().sort((a,b)=>a.date.localeCompare(b.date));
   return{events:ev.map(e=>Object.assign({},e,{live:e.date<=today&&e.end>=today})),_source:src};
@@ -968,10 +982,10 @@ const LOADERS={
   bundesliga_5:fetchEuropa,  // CL + EL + DFB in einem Request
   f1_0:fetchF1Kalender, f1_1:fetchF1Ergebnisse, f1_2:fetchF1Fahrer, f1_3:fetchF1Teams,
   tennis_0:fetchTennisATP, tennis_1:fetchTennisWTA,
-  golf_0:()=>fetchGolfLB(), golf_1:()=>fetchGolfTeeTimes(), golf_2:()=>fetchGolfPlan()
+  golf_0:()=>fetchGolfLB(), golf_1:()=>fetchGolfLB(), golf_2:()=>fetchGolfPlan()
 };
-// bundesliga_4 und bundesliga_5 teilen denselben Cache-Eintrag 'europa'
-const CACHE_ALIAS={'bundesliga_4':'europa','bundesliga_5':'europa'};
+// golf_0 (Leaderboard) und golf_1 (Tee-Times) teilen denselben ESPN-Request
+const CACHE_ALIAS={'bundesliga_4':'europa','bundesliga_5':'europa','golf_1':'golf_0'};
 async function load(sport,tab){
   const k=sport+'_'+tab;
   const ck=CACHE_ALIAS[k]||k;  // effektiver Cache-Key
@@ -1173,7 +1187,7 @@ function rGolfPlan(d){
   }).join('');
 }
 function rGolfTeeTimes(d){
-  let h='<div class="card" style="text-align:center;padding:9px 14px"><div style="font-size:13px;font-weight:700">'+esc(d.tournament||'PGA Tour')+'</div><div style="font-size:11px;color:#555;margin-top:2px">'+esc(d.round||'')+'</div>'+(d.note?'<div style="font-size:10px;color:#444;margin-top:2px">'+esc(d.note)+'</div>':'')+'</div>';
+  let h='<div class="card" style="text-align:center;padding:9px 14px"><div style="font-size:13px;font-weight:700">'+esc(d.tournament||'PGA Tour')+'</div><div style="font-size:11px;color:#555;margin-top:2px">'+esc(d.round||'')+'</div>'+(d.teeNote?'<div style="font-size:10px;color:#444;margin-top:2px">'+esc(d.teeNote)+'</div>':'')+'</div>';
   if(!d.teetimes?.length)return h+'<div class="empty">Keine Tee-Times</div>';
   h+='<div class="card" style="padding:0 6px"><table class="tbl"><thead><tr><th class="l" style="min-width:80px">ET / DE</th><th class="l">Spieler</th></tr></thead><tbody>';
   d.teetimes.forEach(t=>{
@@ -1191,6 +1205,7 @@ function refresh(){
   delete cache[ck];
   // BL-interne Caches auch leeren
   if(state.cur==='bundesliga'){_blCache=null;_getBLCache=null;}
+  if(state.cur==='golf'){_golfLiveCache=null;delete cache['golf_0'];delete cache['golf_2'];}
   load(state.cur,state.tabs[state.cur]);
 }
 
