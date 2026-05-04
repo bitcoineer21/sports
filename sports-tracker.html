@@ -537,16 +537,36 @@ async function fetchF1Ergebnisse(){
   const nowStr=now.toISOString().slice(0,10);
   const meeting=F1_MEETINGS.slice().reverse().find(m=>m.start<=nowStr)||F1_MEETINGS[0];
 
-  const round=F1_MEETINGS.filter(m=>m.start<=nowStr).length||1;
-  const sessions=[];
+  // Korrekte Rundennummer von Jolpica holen (abgesagte Rennen werden nicht gezählt)
+  let round=F1_MEETINGS.filter(m=>m.start<=nowStr).length||1;
   let raceName=meeting.name||'';
+  const sessions=[];
+  try{
+    const cal=await safeFetch('https://api.jolpi.ca/ergast/f1/current/races/?format=json');
+    const races=cal?.MRData?.RaceTable?.Races||[];
+    const lastRace=races.filter(r=>r.date<=nowStr).pop();
+    if(lastRace?.round)round=Number(lastRace.round);
+    if(lastRace?.raceName)raceName=lastRace.raceName;
+  }catch(e){}
 
-  // Alle Quellen parallel abfragen (mit Sprint aus OpenF1)
+  // OpenF1: Race-Session für aktuellen GP holen (nach Meeting-Name filtern)
+  const openSessions=await safeFetch('https://api.openf1.org/v1/sessions?session_type=Race&year='+year+'&limit=10',3000).catch(()=>null);
+  // Neueste Race-Session die zum aktuellen Meeting-Datum passt
+  const meetingDate=meeting?.start||nowStr;
+  const raceSession=(openSessions||[])
+    .filter(s=>s.session_key&&s.date_start&&s.date_start.slice(0,10)>=meetingDate.slice(0,7))
+    .sort((a,b)=>b.session_key-a.session_key)[0];
+  const raceSessionKey=raceSession?.session_key||null;
+
+  // Alle Quellen parallel abfragen — current/last ist robuster als feste Rundennummer
   const [qualiJ, raceJ, sprintJ, openRes] = await Promise.all([
     safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/qualifying/?format=json&limit=20').catch(()=>null),
-    safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/results/?format=json&limit=20').catch(()=>null),
+    Promise.any([
+      safeFetch('https://api.jolpi.ca/ergast/f1/current/last/results/?format=json&limit=20'),
+      safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/results/?format=json&limit=20'),
+    ]).catch(()=>null),
     safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/sprint/?format=json&limit=20').catch(()=>null),
-    safeFetch('https://api.openf1.org/v1/session_result?session_key=latest&limit=50',2000).catch(()=>null),
+    safeFetch(raceSessionKey?'https://api.openf1.org/v1/session_result?session_key='+raceSessionKey+'&limit=50':'https://api.openf1.org/v1/session_result?session_key=latest&limit=50',3000).catch(()=>null),
   ]);
   
   // Lade Sprint dynamisch von OpenF1 - mit Retry
@@ -624,10 +644,9 @@ async function fetchF1Ergebnisse(){
   if(race?.raceName)raceName=race.raceName;
   else if(qualiRace?.raceName)raceName=qualiRace.raceName;
 
-  // ── RENNEN (Main Race) ZUERST (auch wenn noch leer) ──
   // Rennen: Jolpica (offizielle Daten, ab Montag)
   if(race?.Results?.length){
-    sessions.push({label:'Rennen (Sonntag)',date:race.date,isRace:true,results:
+    sessions.push({label:'Rennen',date:race.date,isRace:true,results:
       race.Results.slice(0,20).map(r=>({
         pos:Number(r.position),
         driver:r.Driver.givenName+' '+r.Driver.familyName,
@@ -768,6 +787,23 @@ async function fetchF1Teams(){
 async function fetchTennisJSON(url){
   return safeFetch(url);
 }
+function deTennisRound(s){
+  if(!s)return '';
+  const r=s.toLowerCase().trim();
+  if(r==='final'||r==='finals')return 'Finale';
+  if(r.includes('semifinal')||r==='semi-finals'||r==='semi-final'||r==='semifinals')return 'Halbfinale';
+  if(r.includes('quarterfinal')||r==='quarter-finals'||r==='quarter-final'||r==='quarterfinals')return 'Viertelfinale';
+  if(r.includes('round of 16'))return 'Achtelfinale';
+  if(r.includes('round of 32'))return 'Runde der letzten 32';
+  if(r.includes('round of 64'))return 'Runde der letzten 64';
+  if(r.includes('round of 128'))return 'Runde der letzten 128';
+  if(r==='first round'||r==='1st round'||r==='round 1')return '1. Runde';
+  if(r==='second round'||r==='2nd round'||r==='round 2')return '2. Runde';
+  if(r==='third round'||r==='3rd round'||r==='round 3')return '3. Runde';
+  if(r==='fourth round'||r==='4th round'||r==='round 4')return '4. Runde';
+  if(r.startsWith('round '))return r.replace('round ','Runde ');
+  return s;
+}
 function parseESPNTennisEvent(ev,results,matches){
   const tourn=ev.shortName||ev.name||'';const groupings=ev.groupings||[];const league=ev._league||'';const allComps=[];
   if(groupings.length){groupings.forEach(g=>{const slug=(g.grouping?.slug||'').toLowerCase();if(league==='atp'&&slug.includes('womens'))return;if(league==='wta'&&slug.includes('mens')&&!slug.includes('womens'))return;(g.competitions||[]).forEach(c=>allComps.push(c));});}
@@ -775,7 +811,8 @@ function parseESPNTennisEvent(ev,results,matches){
   for(const comp of allComps){
     const cc=comp.competitors||[];if(cc.length<2)continue;
     const c1=cc[0],c2=cc[1];const p1=c1?.athlete?.displayName||'?',p2=c2?.athlete?.displayName||'?';if(p1==='?'&&p2==='?')continue;
-    const state=comp?.status?.type?.state||'';const completed=comp?.status?.type?.completed||false;const round=comp?.round?.displayName||'';
+    const state=comp?.status?.type?.state||'';const completed=comp?.status?.type?.completed||false;
+    const round=deTennisRound(comp?.round?.displayName||comp?.round?.type?.displayName||'');
     // Qualifier und Qualifying rausfiltern
     if(round.toLowerCase().includes('qualifier')||round.toLowerCase().includes('qualifying'))continue;
     if(state==='pre'){matches.push({player1:p1,player2:p2,status:'upcoming',round,tourn,time:comp.date?ft(comp.date):'',date:comp.date?comp.date.slice(0,10):''});continue;}
