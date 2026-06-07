@@ -383,11 +383,11 @@ function parseSoccer(events, leagueName=''){
 
         // Champions/Europa Liga: Datum-Fallback (nur wenn Notes keine Runde ergaben)
         if(!roundInfo && (leagueName.includes('UEFA')||leagueName.includes('CHAMPIONS')||leagueName.includes('EUROPA'))){
-          const ymd=dateStr; // YYYY-MM-DD
+          const ymd=dateStr;
           if(ymd<'2026-03-01')roundInfo='Playoffs';
           else if(ymd<'2026-04-01')roundInfo='Achtelfinale';
           else if(ymd<'2026-04-22')roundInfo='Viertelfinale';
-          else if(ymd<'2026-05-25')roundInfo='Halbfinale';
+          else if(ymd<'2026-05-18')roundInfo='Halbfinale';
           else roundInfo='Finale';
         }
 
@@ -430,6 +430,23 @@ function parseSoccer(events, leagueName=''){
         else if(roundInfo)return roundInfo;
         else if(legInfo)return legInfo;
         else return notes.map(deESPN).join(' · ')||'';
+      })(),
+      winner:(()=>{
+        if(!done)return 0;
+        // Zuerst winner-Flag direkt vom Competitor prüfen (funktioniert auch bei Elfmeter)
+        if(t1?.winner===true)return 1;
+        if(t2?.winner===true)return 2;
+        const hs=Number(t1?.score||0),as_=Number(t2?.score||0);
+        if(hs>as_)return 1;if(as_>hs)return 2;
+        // Gleichstand → in Notes nach Team-Name + "advance" suchen
+        const allN=[c?.notes?.[0]?.headline,ev.notes?.[0]?.headline,c?.shortDetail].filter(Boolean).join(' ').toLowerCase();
+        if(allN.includes('advance')){
+          const home=(t1?.team?.displayName||'').toLowerCase();
+          const away=(t2?.team?.displayName||'').toLowerCase();
+          if(home.split(' ').some(w=>w.length>3&&allN.includes(w)))return 1;
+          if(away.split(' ').some(w=>w.length>3&&allN.includes(w)))return 2;
+        }
+        return 0;
       })(),
       date:dateStr||null,time:c?.date?ft(c.date):null};
   });
@@ -533,38 +550,48 @@ async function fetchF1Ergebnisse(){
     {key:1302,loc:'abu-dhabi',  name:'Abu Dhabi Grand Prix',     start:'2026-12-04'},
   ];
 
-  // Aktuelles/letztes Meeting
   const nowStr=now.toISOString().slice(0,10);
-  const meeting=F1_MEETINGS.slice().reverse().find(m=>m.start<=nowStr)||F1_MEETINGS[0];
 
-  // Korrekte Rundennummer von Jolpica holen (abgesagte Rennen werden nicht gezählt)
-  let round=F1_MEETINGS.filter(m=>m.start<=nowStr).length||1;
-  let raceName=meeting.name||'';
-  const sessions=[];
+  // Jolpica-Kalender als primäre Quelle für Rundennummer und Rennnamen
+  let round=1, raceName='', raceDate='', isCurrentWeekend=false;
   try{
     const cal=await safeFetch('https://api.jolpi.ca/ergast/f1/current/races/?format=json');
     const races=cal?.MRData?.RaceTable?.Races||[];
-    const lastRace=races.filter(r=>r.date<=nowStr).pop();
-    if(lastRace?.round)round=Number(lastRace.round);
-    if(lastRace?.raceName)raceName=lastRace.raceName;
+    // Aktuelles Wochenende: Renntag ist heute oder max. 4 Tage her (Do-So Fenster)
+    const upcoming=races.find(r=>{const d=new Date(r.date);const diff=(d-now)/86400000;return diff>=-4&&diff<=1;});
+    // Letztes abgeschlossenes Rennen: Renntag mehr als 1 Tag her
+    const lastRace=races.filter(r=>{const d=new Date(r.date);return (d-now)/86400000<-4;}).pop();
+    // Nächstes Rennen
+    const nextRace=races.find(r=>r.date>=nowStr);
+    if(upcoming){
+      round=Number(upcoming.round);raceName=upcoming.raceName;raceDate=upcoming.date;isCurrentWeekend=true;
+    } else if(lastRace){
+      round=Number(lastRace.round);raceName=lastRace.raceName;raceDate=lastRace.date;
+    }
   }catch(e){}
+  // Fallback auf F1_MEETINGS
+  if(!raceName){
+    const meeting=F1_MEETINGS.slice().reverse().find(m=>m.start<=nowStr)||F1_MEETINGS[0];
+    raceName=meeting.name;round=F1_MEETINGS.filter(m=>m.start<=nowStr).length||1;
+  }
+  const sessions=[];
 
-  // OpenF1: Race-Session für aktuellen GP holen (nach Meeting-Name filtern)
+  // OpenF1: Race-Session für aktuellen GP holen
   const openSessions=await safeFetch('https://api.openf1.org/v1/sessions?session_type=Race&year='+year+'&limit=10',3000).catch(()=>null);
-  // Neueste Race-Session die zum aktuellen Meeting-Datum passt
-  const meetingDate=meeting?.start||nowStr;
   const raceSession=(openSessions||[])
-    .filter(s=>s.session_key&&s.date_start&&s.date_start.slice(0,10)>=meetingDate.slice(0,7))
+    .filter(s=>s.session_key&&s.date_start&&s.date_start.slice(0,10)<=nowStr)
     .sort((a,b)=>b.session_key-a.session_key)[0];
   const raceSessionKey=raceSession?.session_key||null;
 
   // Alle Quellen parallel abfragen — current/last ist robuster als feste Rundennummer
   const [qualiJ, raceJ, sprintJ, openRes] = await Promise.all([
     safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/qualifying/?format=json&limit=20').catch(()=>null),
-    Promise.any([
-      safeFetch('https://api.jolpi.ca/ergast/f1/current/last/results/?format=json&limit=20'),
-      safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/results/?format=json&limit=20'),
-    ]).catch(()=>null),
+    isCurrentWeekend
+      ? safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/results/?format=json&limit=20').catch(()=>null)
+      : Promise.any([
+          safeFetch('https://api.jolpi.ca/ergast/f1/current/last/results/?format=json&limit=20'),
+          safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/results/?format=json&limit=20'),
+        ]).catch(()=>null),
     safeFetch('https://api.jolpi.ca/ergast/f1/'+year+'/'+round+'/sprint/?format=json&limit=20').catch(()=>null),
     safeFetch(raceSessionKey?'https://api.openf1.org/v1/session_result?session_key='+raceSessionKey+'&limit=50':'https://api.openf1.org/v1/session_result?session_key=latest&limit=50',3000).catch(()=>null),
   ]);
@@ -736,7 +763,7 @@ async function fetchF1Ergebnisse(){
     });
   }
 
-  return{raceName,raceDate:race?.date||qualiRace?.date||'',sessions,year,meetingKey:meeting.key,locationSlug:meeting.loc};
+  return{raceName,raceDate,sessions,year,meetingKey:round,locationSlug:''};
 }
 async function fetchF1Fahrer(){
   const year=new Date().getFullYear();
@@ -819,6 +846,14 @@ function parseESPNTennisEvent(ev,results,matches){
     const ls1=c1?.linescores||[],ls2=c2?.linescores||[];const parts=[];
     for(let i=0;i<Math.max(ls1.length,ls2.length);i++){const g1=ls1[i]?.displayValue??ls1[i]?.value??'';const g2=ls2[i]?.displayValue??ls2[i]?.value??'';if(g1!==''||g2!=='')parts.push((g1||'0')+'-'+(g2||'0'));}
     let scoreStr=parts.join(' ');if(!scoreStr&&c1?.score!=null&&c2?.score!=null)scoreStr=String(c1.score)+'-'+String(c2.score);
+    // Aufgabe/Walkover wenn kein Score aber Spiel abgeschlossen
+    if(!scoreStr&&completed){
+      const detail=(comp?.status?.detail||comp?.status?.type?.detail||'').toLowerCase();
+      if(detail.includes('walkover')||detail.includes('w/o'))scoreStr='W/O';
+      else if(detail.includes('retired')||detail.includes('retirement'))scoreStr='Aufgabe';
+      else if(detail.includes('default'))scoreStr='Disq.';
+      else scoreStr='Aufgabe';
+    }
     results.push({player1:p1,player2:p2,score1:scoreStr,score2:'',status:completed?'finished':'live',round,tourn,winner:c1?.winner?1:c2?.winner?2:0});
   }
 }
@@ -1037,10 +1072,26 @@ async function load(sport,tab){
 function renderGame(g){
   const lv=g.status==='live',dn=g.status==='finished';
   const roundDisplay=g.round||'';
+  const isFinal=roundDisplay.toLowerCase()==='finale';
+  const hs=g.hs??null,as_=g.as??null;
+  let homeWin=false,awayWin=false;
+  if(dn&&isFinal){
+    const w=g.winner||(hs!=null&&as_!=null?(hs>as_?1:as_>hs?2:0):0);
+    homeWin=w===1;awayWin=w===2;
+  }
+  const homeStyle=homeWin?'font-weight:800;color:#00c878':awayWin?'opacity:0.5':'';
+  const awayStyle=awayWin?'font-weight:800;color:#00c878':homeWin?'opacity:0.5':'';
+  const winnerBadge=homeWin?'<div style="font-size:10px;color:#00c878;font-weight:700;margin-top:2px">🏆 Sieger</div>':awayWin?'<div style="font-size:10px;color:#00c878;font-weight:700;margin-top:2px">🏆 Sieger</div>':'';
   return '<div class="card'+(lv?' live-red':'')+'">'+
     (lv?'<span class="badge red">● LIVE'+(g.clock?' '+esc(g.clock):'')+'</span>':'')+
     (roundDisplay?'<div style="font-size:10px;color:var(--fg2);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;font-weight:800">'+esc(roundDisplay)+'</div>':'')+
-    '<div style="display:flex;align-items:center;gap:10px"><div style="flex:1"><div class="team">'+esc(g.home)+'</div><div class="vs">vs</div><div class="team">'+esc(g.away)+'</div></div>'+
+    '<div style="display:flex;align-items:center;gap:10px"><div style="flex:1">'+
+      '<div class="team" style="'+homeStyle+'">'+esc(g.home)+'</div>'+
+      (homeWin?winnerBadge:'')+
+      '<div class="vs">vs</div>'+
+      '<div class="team" style="'+awayStyle+'">'+esc(g.away)+'</div>'+
+      (awayWin?winnerBadge:'')+
+    '</div>'+
     '<div style="text-align:center;min-width:64px">'+(lv||dn?'<div><div class="score '+(lv?'live':'done')+'">'+(g.hs!=null?g.hs:'-')+' : '+(g.as!=null?g.as:'-')+'</div>'+(dn||lv?'<div style="font-size:10px;color:var(--fg3);margin-top:4px">'+esc(g.time||fd(g.date)||'')+'</div>':'')+'</div>':'<div class="date-info"><div><strong>'+esc(g.time||fd(g.date)||'')+'</strong></div></div>')+
     '</div></div></div>';
 }
@@ -1066,7 +1117,7 @@ function rDFB(d){
   let h='<div class="card" style="text-align:center;padding:9px 14px"><span style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:2px;font-weight:700">DFB Pokal</span></div>';
   if(!games.length)return h+'<div class="empty">Keine Spiele</div>';
   const live=games.filter(g=>g.status==='live');
-  const finished=games.filter(g=>g.status==='finished');
+  const finished=games.filter(g=>g.status==='finished').sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   const upcoming=games.filter(g=>g.status==='upcoming');
   if(live.length){h+='<div class="hdr-sub">Live</div>';h+=renderGames(live);}
   if(finished.length){h+='<div class="hdr-sub">Ergebnisse</div>';h+=renderGames(finished);}
@@ -1129,7 +1180,7 @@ function rF1Ergebnisse(d){
         '<span style="font-size:11px;color:#4a9eff">formula1.com →</span></a>').join('')+
       '</div>';
   }
-  let h='<div class="card" style="text-align:center;padding:9px 14px"><div style="font-size:13px;font-weight:700">'+esc(d.raceName||'')+'</div><div style="font-size:11px;color:var(--fg4)">'+esc(d.raceDate||'')+'</div></div>';
+  let h='<div class="card" style="text-align:center;padding:9px 14px"><div style="font-size:13px;font-weight:700">'+esc(d.raceName||'')+'</div><div style="font-size:11px;color:var(--fg4)">'+esc(d.raceDate?fd(d.raceDate):'')+'</div></div>';
   d.sessions.forEach(s=>{const hasTeam=(s.results||[]).some(r=>r.team);const hasTime=(s.results||[]).some(r=>r.time);const hasPoints=(s.results||[]).some(r=>r.points);h+='<div class="card" style="padding:0 6px"><div style="padding:8px 6px 4px;font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:'+(s.isRace?'#ff4444':'#4a9eff')+'">'+esc(s.label)+'</div>'+(s.pending?'<div style="font-size:12px;color:#555;padding:6px 6px 10px">⏳ Offizielle Ergebnisse folgen in Kürze</div>':s.note?'<div style="font-size:10px;color:#555;padding:0 6px 6px">'+esc(s.note)+'</div>':'')+(s.pending?'':"<table class=\"tbl\"><thead><tr><th>#</th><th class=\"l\">Fahrer</th>"+(hasTeam?'<th class=\"l\">Team</th>':'')+(hasTime?'<th>Zeit</th>':'')+(hasPoints?'<th>Pkt</th>':'')+'</tr></thead><tbody>'+(s.results||[]).map(r=>'<tr><td><span class="pos '+(r.pos<=3?'cl':r.pos<=10?'eu':'')+'">'+r.pos+'</span></td><td class="l"><b>'+esc(r.driver)+'</b></td>'+(hasTeam?'<td class="l" style="font-size:11px;color:var(--fg4)">'+esc(r.team)+'</td>':'')+(hasTime?'<td style="font-size:11px;color:var(--fg4)">'+esc(r.time)+'</td>':'')+(hasPoints?'<td style="text-align:center;font-weight:600">'+(r.points||'-')+'</td>':'')+'</tr>').join('')+'</tbody></table>')+'</div>';});
   return h;
 }
